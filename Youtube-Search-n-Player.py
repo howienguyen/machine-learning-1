@@ -8,6 +8,7 @@ Theme/colors are intentionally matched to `web_audio_capture.py`.
 Environment:
   - GOOGLE_DEVELOPER_API_KEY: YouTube Data API v3 key
     (can be placed in a `.env` file)
+  - YOUTUBE_API_KEY: alias for GOOGLE_DEVELOPER_API_KEY
 """
 
 from __future__ import annotations
@@ -311,41 +312,49 @@ def _youtube_videos_details(api_key: str, video_ids: list[str]) -> dict[str, dic
 
 
 def _is_video_embeddable(video_item: dict[str, Any], region_code: str | None) -> bool:
-    status = (video_item.get("status") or {}) if isinstance(video_item, dict) else {}
-    if not status.get("embeddable", False):
-        return False
-    privacy_status = status.get("privacyStatus")
-    if privacy_status and privacy_status != "public":
-        return False
+  status = (video_item.get("status") or {}) if isinstance(video_item, dict) else {}
 
-    region = (region_code or "").strip().upper()
-    if not region:
-        return True
+  upload_status = status.get("uploadStatus")
+  if upload_status and upload_status != "processed":
+    return False
 
-    content_details = (video_item.get("contentDetails") or {})
-    region_restriction = (content_details.get("regionRestriction") or {})
-    blocked = region_restriction.get("blocked") or []
-    allowed = region_restriction.get("allowed") or []
+  if not status.get("embeddable", False):
+    return False
 
-    try:
-        blocked_set = {str(x).upper() for x in blocked}
-        allowed_set = {str(x).upper() for x in allowed}
-    except Exception:
-        blocked_set = set()
-        allowed_set = set()
+  privacy_status = status.get("privacyStatus")
+  if privacy_status and privacy_status != "public":
+    return False
 
-    if blocked_set and region in blocked_set:
-        return False
-    if allowed_set and region not in allowed_set:
-        return False
+  region = (region_code or "").strip().upper()
+  if not region:
     return True
+
+  content_details = (video_item.get("contentDetails") or {})
+  region_restriction = (content_details.get("regionRestriction") or {})
+  blocked = region_restriction.get("blocked") or []
+  allowed = region_restriction.get("allowed") or []
+
+  try:
+    blocked_set = {str(x).upper() for x in blocked}
+    allowed_set = {str(x).upper() for x in allowed}
+  except Exception:
+    blocked_set = set()
+    allowed_set = set()
+
+  if blocked_set and region in blocked_set:
+    return False
+  if allowed_set and region not in allowed_set:
+    return False
+  return True
 
 
 @app.route("/", methods=["GET"])
 def index():
-  api_key = os.getenv("GOOGLE_DEVELOPER_API_KEY")
+  api_key = os.getenv("GOOGLE_DEVELOPER_API_KEY") or os.getenv("YOUTUBE_API_KEY")
   query = (request.args.get("q") or "").strip()
   video_id = (request.args.get("v") or "").strip()
+
+  selected_title: str = ""
 
   error: str | None = None
   results: list[dict[str, Any]] = []
@@ -353,9 +362,11 @@ def index():
   if query:
     if not api_key:
       error = (
-        "Missing GOOGLE_DEVELOPER_API_KEY in environment.\n"
+        "Missing API key in environment.\n"
         "Create a .env file with:\n\n"
         "  GOOGLE_DEVELOPER_API_KEY=YOUR_KEY\n"
+        "  # or\n"
+        "  YOUTUBE_API_KEY=YOUR_KEY\n"
       )
     else:
       try:
@@ -408,6 +419,15 @@ def index():
           video_id = results[0]["videoId"]
         elif video_id and results and video_id not in {r["videoId"] for r in results}:
           video_id = results[0]["videoId"]
+
+        if video_id:
+          try:
+            selected_title = next(
+              (r.get("title") for r in results if r.get("videoId") == video_id and r.get("title")),
+              "",
+            )
+          except Exception:
+            selected_title = ""
       except Exception as e:
         error = str(e)
 
@@ -442,7 +462,7 @@ def index():
                   <div class="row">
                     <span class="badge">Results: {{ results|length }}</span>
                     {% if video_id %}
-                      <span class="badge">Selected: {{ video_id | e }}</span>
+                      <span class="badge">Selected: {{ (selected_title or video_id) | e }}</span>
                     {% endif %}
                   </div>
 
@@ -503,6 +523,7 @@ def index():
         has_query=bool(query),
         results=results,
         video_id=video_id,
+        selected_title=selected_title,
         error=error,
     )
 
