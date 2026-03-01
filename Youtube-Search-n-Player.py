@@ -156,10 +156,10 @@ def _theme_css() -> str:
         }
 
         .panel {
-            border: 1px solid var(--border);
-            background: rgba(0, 0, 0, 0.18);
-            border-radius: 14px;
-            padding: 14px;
+          border: 0;
+          background: transparent;
+          border-radius: 0;
+          padding: 0;
         }
 
         .results {
@@ -169,7 +169,7 @@ def _theme_css() -> str:
 
         .result {
             border: 1px solid var(--border);
-            border-radius: 12px;
+            border-radius: 6px;
             padding: 12px;
             background: rgba(231, 238, 246, 0.04);
         }
@@ -184,7 +184,7 @@ def _theme_css() -> str:
         .thumb {
           width: 160px;
           max-width: 100%;
-          border-radius: 10px;
+          border-radius: 6px;
           border: 1px solid var(--border);
           background: rgba(0, 0, 0, 0.25);
         }
@@ -229,7 +229,7 @@ def _theme_css() -> str:
             width: 100%;
             aspect-ratio: 16 / 9;
             border: 1px solid var(--border);
-            border-radius: 14px;
+            border-radius: 6px;
             background: rgba(0, 0, 0, 0.25);
         }
 
@@ -237,7 +237,7 @@ def _theme_css() -> str:
           width: 100%;
           height: 520px;
           border: 1px solid var(--border);
-          border-radius: 14px;
+          border-radius: 6px;
           background: rgba(0, 0, 0, 0.25);
         }
 
@@ -246,7 +246,7 @@ def _theme_css() -> str:
             background: rgba(255, 138, 0, 0.10);
             color: var(--text);
             padding: 10px 12px;
-            border-radius: 12px;
+            border-radius: 6px;
             margin-top: 12px;
             text-align: left;
             white-space: pre-wrap;
