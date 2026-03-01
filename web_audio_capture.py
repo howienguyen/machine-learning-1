@@ -162,8 +162,8 @@ class _CaptureManager:
                     normalized = 0.0
 
                 with self._lock:
-                    # simple peak-hold/decay smoothing
-                    self._level = max(normalized, self._level * 0.85)
+                    # Peak-hold with faster decay for responsiveness.
+                    self._level = max(normalized, self._level * 0.60)
         except Exception as e:
             self.last_error = e
         finally:
@@ -339,16 +339,160 @@ def index():
     # Minimal UI: user starts/stops capture; playback plays the last 18 seconds captured.
     return render_template_string('''
         <html>
-            <body style="font-family: sans-serif; text-align: center; margin-top: 50px;">
-                <h2>Last 18 Seconds Recorder</h2>
-                <p>Click Capture to start/stop recording. When stopped, press Play to hear the last 18 seconds.</p>
-                <button id="captureBtn">Capture</button>
-                <audio id="player" controls></audio>
+            <head>
+                <meta charset="utf-8" />
+                <meta name="viewport" content="width=device-width, initial-scale=1" />
+                <title>Last 18 Seconds Recorder</title>
+                <style>
+                    :root {
+                        --bg: #0B0F14;
+                        --panel: #101823;
+                        --panel-2: #0E1620;
+                        --text: #E7EEF6;
+                        --muted: #9BB0C2;
+                        --border: #213041;
+                        --teal: #006A80;
+                        --orange: #FF8A00;
+                    }
 
-                <div style="width: 320px; margin: 16px auto 0; text-align: left;">
-                    <div style="font-size: 12px; margin-bottom: 6px;">Audio Level</div>
-                    <div style="height: 10px; background: #eee; border: 1px solid #ccc;">
-                        <div id="levelBar" style="height: 10px; width: 0%; background: #666;"></div>
+                    * { box-sizing: border-box; }
+                    html, body { height: 100%; }
+                    body {
+                        margin: 0;
+                        background: radial-gradient(1200px 600px at 20% 10%, rgba(0, 106, 128, 0.22), transparent 55%),
+                                    radial-gradient(900px 500px at 80% 20%, rgba(255, 138, 0, 0.10), transparent 60%),
+                                    var(--bg);
+                        color: var(--text);
+                        font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+                        line-height: 1.4;
+                    }
+
+                    .wrap {
+                        max-width: 760px;
+                        margin: 0 auto;
+                        padding: 40px 16px;
+                    }
+
+                    .card {
+                        background: linear-gradient(180deg, rgba(16, 24, 35, 0.92), rgba(14, 22, 32, 0.92));
+                        border: 1px solid var(--border);
+                        border-radius: 16px;
+                        padding: 20px 18px;
+                    }
+
+                    h2 {
+                        margin: 0 0 6px;
+                        font-size: 20px;
+                        letter-spacing: 0.2px;
+                    }
+
+                    .sub {
+                        margin: 0 0 18px;
+                        color: var(--muted);
+                        font-size: 13px;
+                    }
+
+                    .row {
+                        display: flex;
+                        gap: 12px;
+                        align-items: center;
+                        justify-content: center;
+                        flex-wrap: wrap;
+                        margin-top: 14px;
+                    }
+
+                    button {
+                        appearance: none;
+                        border: 1px solid rgba(0, 106, 128, 0.45);
+                        background: linear-gradient(180deg, rgba(0, 106, 128, 1), rgba(0, 86, 104, 1));
+                        color: #FFFFFF;
+                        font-weight: 600;
+                        border-radius: 10px;
+                        padding: 10px 14px;
+                        cursor: pointer;
+                    }
+
+                    button:hover {
+                        border-color: rgba(255, 138, 0, 0.55);
+                    }
+
+                    button:disabled {
+                        cursor: not-allowed;
+                        opacity: 0.7;
+                    }
+
+                    audio {
+                        width: min(560px, 100%);
+                        border-radius: 10px;
+                        border: 1px solid var(--border);
+                        background: rgba(0, 0, 0, 0.25);
+                    }
+
+                    .meter {
+                        width: min(560px, 100%);
+                        margin: 16px auto 0;
+                        text-align: left;
+                    }
+
+                    .meter-label {
+                        display: flex;
+                        align-items: center;
+                        justify-content: space-between;
+                        color: var(--muted);
+                        font-size: 12px;
+                        margin-bottom: 8px;
+                    }
+
+                    .bar {
+                        height: 12px;
+                        background: rgba(231, 238, 246, 0.06);
+                        border: 1px solid var(--border);
+                        border-radius: 999px;
+                        overflow: hidden;
+                    }
+
+                    .bar > div {
+                        height: 12px;
+                        width: 0%;
+                        background: linear-gradient(90deg, var(--teal), var(--orange));
+                        transition: width 90ms linear;
+                    }
+
+                    .badge {
+                        display: inline-block;
+                        padding: 3px 8px;
+                        border-radius: 999px;
+                        font-size: 11px;
+                        border: 1px solid rgba(0, 106, 128, 0.45);
+                        color: var(--text);
+                        background: rgba(0, 106, 128, 0.12);
+                    }
+                </style>
+            </head>
+            <body style="font-family: sans-serif; text-align: center; margin-top: 50px;">
+                <div class="wrap">
+                    <div class="card">
+                        <h2>Last 18 Seconds Recorder</h2>
+                        <p class="sub">Capture system audio silently, then play back the most recent 18 seconds.</p>
+
+                        <div class="row">
+                            <button id="captureBtn">Capture</button>
+                            <span class="badge" id="statusBadge">Idle</span>
+                        </div>
+
+                        <div class="row" style="margin-top: 16px;">
+                            <audio id="player" controls></audio>
+                        </div>
+
+                        <div class="meter">
+                            <div class="meter-label">
+                                <span>Audio Level</span>
+                                <span id="modeLabel">---</span>
+                            </div>
+                            <div class="bar">
+                                <div id="levelBar"></div>
+                            </div>
+                        </div>
                     </div>
                 </div>
 
@@ -356,13 +500,29 @@ def index():
                                     const player = document.getElementById('player');
                                     const captureBtn = document.getElementById('captureBtn');
                                     const levelBar = document.getElementById('levelBar');
+                                    const statusBadge = document.getElementById('statusBadge');
+                                    const modeLabel = document.getElementById('modeLabel');
                                     let capturing = false;
                                     let levelPoll = null;
                                     let analyserLoopRunning = false;
+                                    let levelSmoothed = 0;
+                                    let meterMode = 'idle'; // 'capture' | 'playback' | 'idle'
+
+                                    function resetMeter() {
+                                        levelSmoothed = 0;
+                                        levelBar.style.width = '0%';
+                                    }
 
                                     function setLevel(level01) {
-                                        const v = Math.max(0, Math.min(1, level01 || 0));
-                                        levelBar.style.width = Math.round(v * 100) + '%';
+                                        const target = Math.max(0, Math.min(1, level01 || 0));
+                                        // Mode-aware smoothing:
+                                        // - capture: responsive
+                                        // - playback: smooth
+                                        const attack = meterMode === 'capture' ? 0.75 : 0.35;
+                                        const release = meterMode === 'capture' ? 0.30 : 0.08;
+                                        const k = target > levelSmoothed ? attack : release;
+                                        levelSmoothed = levelSmoothed + (target - levelSmoothed) * k;
+                                        levelBar.style.width = Math.round(levelSmoothed * 100) + '%';
                                     }
 
                                     function setCapturingUI(isCapturing) {
@@ -374,10 +534,20 @@ def index():
                                             player.src = '';
                                             player.load();
                                             captureBtn.textContent = 'Stop';
+                                            statusBadge.textContent = 'Capturing';
+                                            modeLabel.textContent = 'CAPTURE';
+                                            meterMode = 'capture';
+                                            levelBar.style.transition = 'width 0ms linear';
+                                            resetMeter();
                                             startLevelPolling();
                                         } else {
                                             player.style.pointerEvents = 'auto';
                                             captureBtn.textContent = 'Capture';
+                                            statusBadge.textContent = 'Idle';
+                                            modeLabel.textContent = '---';
+                                            meterMode = 'idle';
+                                            levelBar.style.transition = 'width 30ms linear';
+                                            resetMeter();
                                             stopLevelPolling();
                                         }
                                     }
@@ -452,6 +622,7 @@ def index():
                                             const source = audioCtx.createMediaElementSource(player);
                                             const analyser = audioCtx.createAnalyser();
                                             analyser.fftSize = 256;
+                                            analyser.smoothingTimeConstant = 0.6;
                                             source.connect(analyser);
                                             analyser.connect(audioCtx.destination);
                                             const buf = new Uint8Array(analyser.frequencyBinCount);
@@ -483,14 +654,30 @@ def index():
 
                                     player.addEventListener('playing', () => {
                                         if (!capturing) startPlaybackAnalyser();
+                                        statusBadge.textContent = 'Playing';
+                                        modeLabel.textContent = 'PLAYBACK';
+                                        meterMode = 'playback';
+                                        levelBar.style.transition = 'width 90ms linear';
                                     });
 
                                     player.addEventListener('pause', () => {
-                                        // keep last level displayed
+                                        // stop displaying level when playback stops
+                                        if (!capturing) {
+                                            statusBadge.textContent = 'Idle';
+                                            modeLabel.textContent = '---';
+                                            meterMode = 'idle';
+                                            resetMeter();
+                                        }
                                     });
 
                                     player.addEventListener('ended', () => {
-                                        // keep last level displayed
+                                        // stop displaying level when playback ends
+                                        if (!capturing) {
+                                            statusBadge.textContent = 'Idle';
+                                            modeLabel.textContent = '---';
+                                            meterMode = 'idle';
+                                            resetMeter();
+                                        }
                                     });
 
                                     // Initial state: not capturing; playback enabled.
