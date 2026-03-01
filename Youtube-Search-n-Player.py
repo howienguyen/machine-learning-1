@@ -13,6 +13,7 @@ Environment:
 from __future__ import annotations
 
 import os
+import urllib.parse
 from typing import Any
 
 import dotenv
@@ -46,9 +47,12 @@ def _theme_css() -> str:
             background: radial-gradient(1200px 600px at 20% 10%, rgba(0, 106, 128, 0.22), transparent 55%),
                         radial-gradient(900px 500px at 80% 20%, rgba(255, 138, 0, 0.10), transparent 60%),
                         var(--bg);
+          background-repeat: no-repeat;
+          background-attachment: fixed;
             color: var(--text);
             font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
             line-height: 1.4;
+          min-height: 100vh;
         }
 
         .wrap {
@@ -62,6 +66,10 @@ def _theme_css() -> str:
             border: 1px solid var(--border);
             border-radius: 16px;
             padding: 20px 18px;
+        }
+
+        .card + .card {
+          margin-top: 14px;
         }
 
         h2 {
@@ -147,10 +155,6 @@ def _theme_css() -> str:
             margin-top: 18px;
         }
 
-        @media (min-width: 900px) {
-            .grid { grid-template-columns: 1fr 1fr; }
-        }
-
         .panel {
             border: 1px solid var(--border);
             background: rgba(0, 0, 0, 0.18);
@@ -229,6 +233,14 @@ def _theme_css() -> str:
             background: rgba(0, 0, 0, 0.25);
         }
 
+        .site-frame {
+          width: 100%;
+          height: 520px;
+          border: 1px solid var(--border);
+          border-radius: 14px;
+          background: rgba(0, 0, 0, 0.25);
+        }
+
         .error {
             border: 1px solid rgba(255, 138, 0, 0.55);
             background: rgba(255, 138, 0, 0.10);
@@ -264,57 +276,142 @@ def _youtube_search(api_key: str, query: str, max_results: int = 8) -> dict[str,
     return response.json()
 
 
+def _youtube_videos_details(api_key: str, video_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """Fetch details for a set of video IDs (used to pre-filter embeddability).
+
+    This reduces the chance of the embedded player showing "Video unavailable"
+    due to embedding being disabled, privacy, or region restrictions.
+    """
+    if not video_ids:
+        return {}
+
+    # YouTube API allows up to 50 IDs per videos.list call.
+    url = "https://www.googleapis.com/youtube/v3/videos"
+    details: dict[str, dict[str, Any]] = {}
+    chunk_size = 50
+    for start in range(0, len(video_ids), chunk_size):
+        chunk = video_ids[start : start + chunk_size]
+        params = {
+            "part": "status,contentDetails",
+            "id": ",".join(chunk),
+            "key": api_key,
+        }
+        response = requests.get(url, params=params, timeout=20)
+        if not response.ok:
+            try:
+                raise RuntimeError(response.json())
+            except ValueError:
+                response.raise_for_status()
+        payload = response.json() or {}
+        for item in payload.get("items", []) or []:
+            vid = item.get("id")
+            if vid:
+                details[str(vid)] = item
+    return details
+
+
+def _is_video_embeddable(video_item: dict[str, Any], region_code: str | None) -> bool:
+    status = (video_item.get("status") or {}) if isinstance(video_item, dict) else {}
+    if not status.get("embeddable", False):
+        return False
+    privacy_status = status.get("privacyStatus")
+    if privacy_status and privacy_status != "public":
+        return False
+
+    region = (region_code or "").strip().upper()
+    if not region:
+        return True
+
+    content_details = (video_item.get("contentDetails") or {})
+    region_restriction = (content_details.get("regionRestriction") or {})
+    blocked = region_restriction.get("blocked") or []
+    allowed = region_restriction.get("allowed") or []
+
+    try:
+        blocked_set = {str(x).upper() for x in blocked}
+        allowed_set = {str(x).upper() for x in allowed}
+    except Exception:
+        blocked_set = set()
+        allowed_set = set()
+
+    if blocked_set and region in blocked_set:
+        return False
+    if allowed_set and region not in allowed_set:
+        return False
+    return True
+
+
 @app.route("/", methods=["GET"])
 def index():
-    api_key = os.getenv("GOOGLE_DEVELOPER_API_KEY")
-    query = (request.args.get("q") or "").strip()
-    video_id = (request.args.get("v") or "").strip()
-    error = None
-    results: list[dict[str, Any]] = []
+  api_key = os.getenv("GOOGLE_DEVELOPER_API_KEY")
+  query = (request.args.get("q") or "").strip()
+  video_id = (request.args.get("v") or "").strip()
 
-    if query:
-        if not api_key:
-            error = (
-                "Missing GOOGLE_DEVELOPER_API_KEY in environment.\n"
-                "Create a .env file with:\n\n"
-                "  GOOGLE_DEVELOPER_API_KEY=YOUR_KEY\n"
-            )
-        else:
-            try:
-                payload = _youtube_search(api_key=api_key, query=query, max_results=8)
-                for item in payload.get("items", []):
-                    vid = (item.get("id") or {}).get("videoId")
-                    snippet = item.get("snippet") or {}
-                    title = snippet.get("title") or "(untitled)"
-                    description = snippet.get("description") or ""
-                    channel = snippet.get("channelTitle") or ""
-                    published = snippet.get("publishedAt") or ""
-                    thumbnails = snippet.get("thumbnails") or {}
-                    # Prefer medium/high, fall back to default.
-                    thumbnail_url = (
-                        (thumbnails.get("medium") or {}).get("url")
-                        or (thumbnails.get("high") or {}).get("url")
-                        or (thumbnails.get("default") or {}).get("url")
-                        or ""
-                    )
-                    if not vid:
-                        continue
-                    results.append(
-                        {
-                            "videoId": str(vid),
-                            "title": str(title),
-                            "description": str(description),
-                            "channel": str(channel),
-                            "publishedAt": str(published),
-                            "thumbnailUrl": str(thumbnail_url),
-                        }
-                    )
-                if not video_id and results:
-                    video_id = results[0]["videoId"]
-            except Exception as e:
-                error = str(e)
+  error: str | None = None
+  results: list[dict[str, Any]] = []
 
-    return render_template_string(
+  if query:
+    if not api_key:
+      error = (
+        "Missing GOOGLE_DEVELOPER_API_KEY in environment.\n"
+        "Create a .env file with:\n\n"
+        "  GOOGLE_DEVELOPER_API_KEY=YOUR_KEY\n"
+      )
+    else:
+      try:
+        payload = _youtube_search(api_key=api_key, query=query, max_results=8)
+        region_code = payload.get("regionCode") or ""
+
+        for item in payload.get("items", []):
+          vid = (item.get("id") or {}).get("videoId")
+          if not vid:
+            continue
+
+          snippet = item.get("snippet") or {}
+          title = snippet.get("title") or "(untitled)"
+          description = snippet.get("description") or ""
+          channel = snippet.get("channelTitle") or ""
+          published = snippet.get("publishedAt") or ""
+          thumbnails = snippet.get("thumbnails") or {}
+          thumbnail_url = (
+            (thumbnails.get("medium") or {}).get("url")
+            or (thumbnails.get("high") or {}).get("url")
+            or (thumbnails.get("default") or {}).get("url")
+            or ""
+          )
+
+          results.append(
+            {
+              "videoId": str(vid),
+              "title": str(title),
+              "description": str(description),
+              "channel": str(channel),
+              "publishedAt": str(published),
+              "thumbnailUrl": str(thumbnail_url),
+            }
+          )
+
+        # Pre-filter to videos that should embed successfully.
+        try:
+          video_ids = [r["videoId"] for r in results if r.get("videoId")]
+          details = _youtube_videos_details(api_key=api_key, video_ids=video_ids)
+          embeddable_ids = {
+            vid
+            for vid, item in details.items()
+            if _is_video_embeddable(item, region_code=region_code)
+          }
+          results = [r for r in results if r.get("videoId") in embeddable_ids]
+        except Exception:
+          pass
+
+        if not video_id and results:
+          video_id = results[0]["videoId"]
+        elif video_id and results and video_id not in {r["videoId"] for r in results}:
+          video_id = results[0]["videoId"]
+      except Exception as e:
+        error = str(e)
+
+  return render_template_string(
         """
         <html>
           <head>
