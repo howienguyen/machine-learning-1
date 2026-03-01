@@ -286,27 +286,27 @@ def index():
                     vid = (item.get("id") or {}).get("videoId")
                     snippet = item.get("snippet") or {}
                     title = snippet.get("title") or "(untitled)"
-                  description = snippet.get("description") or ""
+                    description = snippet.get("description") or ""
                     channel = snippet.get("channelTitle") or ""
                     published = snippet.get("publishedAt") or ""
-                  thumbnails = snippet.get("thumbnails") or {}
-                  # Prefer medium/high, fall back to default.
-                  thumbnail_url = (
-                    (thumbnails.get("medium") or {}).get("url")
-                    or (thumbnails.get("high") or {}).get("url")
-                    or (thumbnails.get("default") or {}).get("url")
-                    or ""
-                  )
+                    thumbnails = snippet.get("thumbnails") or {}
+                    # Prefer medium/high, fall back to default.
+                    thumbnail_url = (
+                        (thumbnails.get("medium") or {}).get("url")
+                        or (thumbnails.get("high") or {}).get("url")
+                        or (thumbnails.get("default") or {}).get("url")
+                        or ""
+                    )
                     if not vid:
                         continue
                     results.append(
                         {
                             "videoId": str(vid),
                             "title": str(title),
-                      "description": str(description),
+                            "description": str(description),
                             "channel": str(channel),
                             "publishedAt": str(published),
-                      "thumbnailUrl": str(thumbnail_url),
+                            "thumbnailUrl": str(thumbnail_url),
                         }
                     )
                 if not video_id and results:
