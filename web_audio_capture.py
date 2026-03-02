@@ -11,6 +11,8 @@ import logging
 from flask import Flask, Response, render_template_string
 import pyaudiowpatch as pyaudio
 
+import audio_backend
+
 FRAMES_PER_BUFFER = 4096
 CLIP_SECONDS = 18
 
@@ -150,10 +152,12 @@ class _CaptureManager:
             stream, sample_rate, channels = _open_wasapi_loopback_stream(p)
             rolling_buffer.configure(sample_rate=sample_rate, channels=channels)
             rolling_buffer.clear()
+            audio_backend.on_capture_started(sample_rate, channels)
 
             while not stop_event.is_set():
                 data = stream.read(FRAMES_PER_BUFFER, exception_on_overflow=False)
                 rolling_buffer.push(data)
+                audio_backend.on_chunk(data, sample_rate, channels)
 
                 # RMS level for UI meter (0..1). Smoothed for stability.
                 try:
@@ -167,6 +171,7 @@ class _CaptureManager:
         except Exception as e:
             self.last_error = e
         finally:
+            audio_backend.on_capture_stopped()
             try:
                 if stream is not None:
                     stream.stop_stream()
@@ -283,6 +288,10 @@ def clip_wav():
             msg += f" Capture error: {capture_manager.last_error}"
         return Response(msg, status=503, mimetype="text/plain")
 
+    with rolling_buffer._lock:
+        sr = rolling_buffer.sample_rate
+        ch = rolling_buffer.channels
+    audio_backend.on_clip_served(wav_bytes, sr or 0, ch or 0)
     return Response(wav_bytes, mimetype="audio/wav")
 
 
@@ -689,5 +698,10 @@ def index():
 
 if __name__ == "__main__":
     # Threaded=True is required so the web server can serve the UI and the stream simultaneously
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s  %(levelname)-8s  %(name)s — %(message)s",
+        datefmt="%H:%M:%S",
+    )
     logging.getLogger("werkzeug").addFilter(_SuppressLevelEndpointFilter())
     app.run(host="0.0.0.0", port=5000, threaded=True)

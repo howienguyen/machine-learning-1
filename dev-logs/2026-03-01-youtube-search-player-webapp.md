@@ -107,13 +107,22 @@ Turn `Youtube-Search-n-Player.py` into a web app and apply the same theme/colors
 ### 5) Reduce “Video unavailable” embeds
 Observed: some search results still fail to embed (embedding disabled, region restrictions, etc.).
 
+Key takeaway:
+- The most reliable way to verify embedding status is by querying the official YouTube Data API for that specific video (i.e., `videos.list` with `part=status,contentDetails`) and filtering based on those fields, rather than trying to “detect” the message inside the embedded iframe.
+  - In code, this can be done either via raw HTTP (`requests` to `https://www.googleapis.com/youtube/v3/videos`) or via `googleapiclient.discovery.build(...)` — it’s the same underlying official API.
+
 Mitigation implemented:
 - After `search.list`, call `videos.list` (`part=status,contentDetails`) for returned IDs.
 - Filter results to:
   - `status.embeddable == true`
   - `status.privacyStatus == public`
+  - `status.uploadStatus == processed` (when present)
   - pass region restrictions (based on `search.list` response `regionCode` and `contentDetails.regionRestriction`).
 - If a user-selected `v=` is filtered out, fall back to the first playable result.
+
+Small UX follow-ups:
+- Badge text changed from `Selected: <videoId>` to `Selected: <title>` (falls back to ID if title not available).
+- API key env var accepts `YOUTUBE_API_KEY` as an alias for `GOOGLE_DEVELOPER_API_KEY`.
 
 ### 6) Layout requested: 1 column with two areas
 - Updated layout to always be a single column:
