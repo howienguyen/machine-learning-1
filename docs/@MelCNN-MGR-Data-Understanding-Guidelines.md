@@ -4,7 +4,7 @@ For **data understanding + EDA** on **FMA**, the best starting point is actually
 
 ### 1) **`analysis.ipynb` (official, EDA-focused)**
 
-This is the “true EDA notebook” of the project: it explores **metadata, splits, and the provided features**, and it’s the notebook used to generate figures for the original paper. If your goal is *understand what’s inside FMA and how it’s structured*, this is the one. ([GitHub][1])
+This is the “true EDA notebook” of the project: it explores **metadata, splits, and the provided features**, and it’s the notebook used to generate figures for the original paper. If your goal is *understand what’s inside FMA and how it’s structured*, this is the one. 
 
 What you’ll learn from it (typical flow):
 
