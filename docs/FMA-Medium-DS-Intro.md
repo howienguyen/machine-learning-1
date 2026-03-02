@@ -1,5 +1,9 @@
 ### Introduction to **FMA-medium** (Free Music Archive – medium subset)
 
+FMA-medium is a curated subset of the Free Music Archive (FMA) dataset built for music information retrieval (MIR) and ML tasks such as genre recognition, created to give researchers an openly usable collection of Creative Commons–licensed music with standardized splits, precomputed features, and rich, structured metadata—so experiments are reproducible without redoing all the dataset plumbing. In practice, FMA-medium provides 25,000 fixed-length (30s) MP3 clips, labeled into 16 unbalanced genres, with an audio archive around ~22 GiB, and it ships with fma_metadata tables (track/artist/album info, genre taxonomy, and recommended split) plus baseline references that make it ideal for benchmarking and iterative model development.
+
+---
+
 **FMA-medium** is a curated subset of the **Free Music Archive (FMA)** dataset designed for **music information retrieval (MIR)** and ML tasks like **genre recognition**. The broader FMA project was created to provide a large, openly usable collection of **Creative Commons–licensed** music with **standard splits**, **precomputed features**, and rich metadata—so researchers can train and compare models without reinventing the dataset plumbing every time. ([arXiv][1])
 
 #### Core characteristics / properties

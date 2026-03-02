@@ -1,5 +1,9 @@
 # Project Proposal: MFCC+CNN vs Log-Mel+CNN on FMA-Medium (Controlled + Optimized)
 
+Mon Mar  2 09:00:00 UTC 2026
+
+Project name: MelCNN MGR (MGR = Music Genre Recognition)
+
 ## 1. Project Overview
 
 This project uses the **FMA-medium** dataset (25,000 tracks, 30 seconds each, 16 unbalanced genres) to study a common claim in music genre classification:
