@@ -212,3 +212,6 @@ FMA/fma_metadata/
 FMA/fma_small.zip
 FMA/fma_medium/
 FMA/fma_medium.zip
+
+
+.venv311/
