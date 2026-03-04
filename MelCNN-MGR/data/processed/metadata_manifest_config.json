@@ -1,0 +1,9 @@
+{
+  "subset": "medium",
+  "audio_root": "/mnt/d/mse/nguyen_sy_hung_codebases/machine-learning-1/FMA/fma_medium",
+  "metadata_root": "/mnt/d/mse/nguyen_sy_hung_codebases/machine-learning-1/FMA/fma_metadata",
+  "out_dir": "/mnt/d/mse/nguyen_sy_hung_codebases/machine-learning-1/MelCNN-MGR/data/processed",
+  "min_duration_s": 30,
+  "decode_probe": false,
+  "generated_at": "2026-03-04T04:10:03Z"
+}

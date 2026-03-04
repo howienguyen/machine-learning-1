@@ -1,0 +1,19 @@
+# Web / API
+flask
+requests
+python-dotenv
+rich
+
+# Audio capture (Windows WASAPI loopback — install only on Windows)
+pyaudiowpatch; sys_platform == "win32"
+
+# Data science
+numpy
+pandas
+pyarrow
+scipy
+matplotlib
+
+# Audio / ML
+librosa
+tensorflow[and-cuda]
