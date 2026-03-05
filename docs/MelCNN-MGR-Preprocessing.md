@@ -86,12 +86,16 @@ A good metadata manifest build produces two kinds of outputs:
 
 **Outputs:**
 
-| Artifact                    | Contents                                             | Usage                       |
-| --------------------------- | ---------------------------------------------------- | --------------------------- |
-| `metadata_manifest.parquet` | all candidates, including dropped rows + reasons     | debugging + reproducibility |
-| `train.parquet`             | `metadata_manifest` filtered to split=train and `OK` | dataloader input            |
-| `val.parquet`               | filtered                                             | dataloader input            |
-| `test.parquet`              | filtered                                             | final evaluation            |
+All artifact filenames include the target subset tag (e.g. `_medium`) so outputs for different subsets can coexist in the same directory.
+
+| Artifact                             | Contents                                                    | Usage                       |
+| ------------------------------------ | ----------------------------------------------------------- | --------------------------- |
+| `metadata_manifest_{subset}.parquet` | all candidates, including dropped rows + reasons            | debugging + reproducibility |
+| `train_{subset}.parquet`             | `metadata_manifest` filtered to split=training and `OK`     | dataloader input            |
+| `val_{subset}.parquet`               | filtered to split=validation and `OK`                       | dataloader input            |
+| `test_{subset}.parquet`              | filtered to split=test and `OK`                             | final evaluation            |
+| `metadata_manifest_config_{subset}.json` | config snapshot used to generate the manifest           | reproducibility             |
+| `metadata_manifest_report_{subset}.txt`  | quality-gate summary (reason codes, split/genre counts)  | auditing                    |
 
 ---
 
@@ -149,6 +153,50 @@ Keep `reason_code` as a single value per row. If you need multi-reason, add `rea
 
 ---
 
+## Audio decode quality: the `dequantization failed` warning
+
+### What it is
+
+When `librosa.load()` is called on an FMA MP3, libmpg123 (the C-level MP3 decoder) may print:
+
+```
+[src/libmpg123/layer3.c:INT123_do_layer3():1844] error: dequantization failed!
+```
+
+This message comes from **C-level stderr (OS fd 2)** — it bypasses Python's `sys.stderr` entirely, so `contextlib.redirect_stderr()` cannot catch it and it does not raise an exception.
+
+### Root cause
+
+Layer III (Layer 3 = MP3) encoding uses Huffman coding for the spectral data in each frame.
+When the Huffman packet for a frame is corrupt or malformed, the decoder cannot reconstruct the PCM samples for that ~26 ms window.
+libmpg123 recovers by **zeroing those samples** and continuing.
+The audio array returned by `librosa.load` has the correct length and the MFCC matrix has the correct shape, but values for the affected time windows are replaced with silence.
+
+### Impact in FMA
+
+| Concern | Reality |
+|---|---|
+| Does it crash extraction? | No — `librosa.load` returns normally, no exception |
+| Is the MFCC shape correct? | Yes — always `(13, 2582)` |
+| Are MFCC values wrong? | **Yes** — affected ~26ms frames are zeroed |
+| Is it counted in `skipped`? | **No** (without the fix) — it passes through silently |
+| How many tracks are affected? | ~1–5 % of FMA; one corrupt track can print the message dozens of times |
+| Does it affect reproducibility? | No — same corrupt file → same zeroed frames every run |
+
+### The fix (in `baseline_mfcc_cnn_v2.py` / `.ipynb`)
+
+The only reliable way to detect the C-level message in-process on Linux is to temporarily replace OS file descriptor 2 with a pipe during `librosa.load()`, then scan the pipe contents for libmpg123 error strings after decoding completes. fd 2 is always restored in a `finally` block.
+
+`load_mfcc()` returns a `(mfcc, is_clean)` tuple.
+`extract_split()` accepts a `skip_degraded: bool` parameter (controlled by `SKIP_DEGRADED` in the config):
+
+| `SKIP_DEGRADED` | Behaviour |
+|---|---|
+| `False` (default) | Degraded tracks are **included** in the cache but counted separately. Use for the faithful FMA baseline reproduction. |
+| `True` | Degraded tracks are **excluded** (counted as `skipped`). Use for cleaner input in your own model variants. Clearing the cache (`CLEAR_CACHE = True`) is required for this change to take effect on an existing cache. |
+
+---
+
 ## Split policy guidance (leakage motivation)
 
 If you have an official FMA split available, use it. If you don’t, do not randomly split by track: music is “style-correlated,” and the biggest leakage culprit is **artist**.
@@ -199,9 +247,10 @@ Run these checks and record them in a small build log.
 
 ## Practical naming + storage conventions
 
-* Store `metadata_manifest.parquet` under a run-specific directory, e.g. `data/processed/fma/run_001/metadata_manifest.parquet`
-* Save the config used to generate it (YAML/JSON), e.g. `metadata_manifest_config.json`
-* Keep an audit summary file, e.g. `metadata_manifest_report.txt` with gate stats and reason-code counts
+* Artifact filenames always include the subset tag: `metadata_manifest_{subset}.parquet`, `train_{subset}.parquet`, `val_{subset}.parquet`, `test_{subset}.parquet`, `metadata_manifest_config_{subset}.json`, `metadata_manifest_report_{subset}.txt`.
+* Store all produced artifacts under a shared output directory, e.g. `MelCNN-MGR/data/processed/`; the subset suffix makes different runs coexist safely.
+* The config snapshot (`metadata_manifest_config_{subset}.json`) records all CLI arguments + timestamp for reproducibility.
+* The report (`metadata_manifest_report_{subset}.txt`) contains reason-code counts, split distribution, genre distribution, and the artist-leakage check.
 
 This is boring infrastructure — and boring infrastructure is what makes experiments trustworthy.
 

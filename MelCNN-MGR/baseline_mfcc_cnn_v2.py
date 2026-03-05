@@ -43,13 +43,15 @@ import pandas as pd
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 # Locate the workspace root from this file's location
-SCRIPT_DIR   = Path(__file__).resolve().parent          # …/MelCNN-MGR
-WORKSPACE    = SCRIPT_DIR.parent                        # …/machine-learning-1
-METADATA_DIR = WORKSPACE / "FMA" / "fma_metadata"
-AUDIO_DIR    = WORKSPACE / "FMA" / "fma_medium"
-CACHE_DIR    = SCRIPT_DIR / "cache"
-RESULTS_DIR  = SCRIPT_DIR / "results"
-MODELS_DIR   = SCRIPT_DIR / "models" / "mfcc_cnn"
+SCRIPT_DIR    = Path(__file__).resolve().parent          # …/MelCNN-MGR
+WORKSPACE     = SCRIPT_DIR.parent                        # …/machine-learning-1
+PROCESSED_DIR = SCRIPT_DIR / "data" / "processed"        # manifest parquets
+CACHE_DIR     = SCRIPT_DIR / "cache"
+RESULTS_DIR   = SCRIPT_DIR / "results"
+MODELS_DIR    = SCRIPT_DIR / "models" / "mfcc_cnn"
+
+# Default subset name — must match the suffix used by build_manifest.py
+DEFAULT_SUBSET = "small"   # one of "small", "medium", "large"
 
 # ── MFCC params (same as original) ───────────────────────────────────────────
 SAMPLE_RATE  = 22050
@@ -127,32 +129,67 @@ def configure_runtime_device(tf):
 # 2. Data loading
 # ─────────────────────────────────────────────────────────────────────────────
 
-def load_metadata():
-    """Load tracks.csv and return the medium subset with valid genre_top labels."""
-    tracks = pd.read_csv(METADATA_DIR / "tracks.csv", header=[0, 1], index_col=0)
+def load_manifest_splits(
+    processed_dir: Path = PROCESSED_DIR,
+    subset: str = DEFAULT_SUBSET,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Load the pre-built manifest split parquets produced by build_manifest.py.
 
-    # Keep only fma_medium subset
-    medium_mask = tracks["set", "subset"] <= "medium"
-    tracks = tracks[medium_mask]
+    Each parquet contains only ``reason_code == OK`` rows for the given subset,
+    with flat columns: ``filepath``, ``genre_top``, ``split``, ``artist_id``,
+    ``duration_s``, ``bit_rate``, ``filesize_bytes``, ``audio_exists``.
 
-    # Keep only rows with a genre_top label
-    has_genre = tracks["track", "genre_top"].notna()
-    tracks = tracks[has_genre]
+    Parameters
+    ----------
+    processed_dir:
+        Directory that contains ``train_{subset}.parquet``, etc.
+        Defaults to ``MelCNN-MGR/data/processed``.
+    subset:
+        FMA subset tag used as the filename suffix (e.g. ``"medium"`` →
+        ``train_medium.parquet``).
 
-    return tracks
+    Returns
+    -------
+    (train_df, val_df, test_df) — DataFrames indexed by ``track_id``.
+    """
+    def _load(name: str) -> pd.DataFrame:
+        path = processed_dir / f"{name}_{subset}.parquet"
+        if not path.exists():
+            raise FileNotFoundError(
+                f"Manifest parquet not found: {path}\n"
+                f"Run build_manifest.py first:\n"
+                f"  python MelCNN-MGR/preprocessing/build_manifest.py"
+            )
+        return pd.read_parquet(path)
+
+    train_df = _load("train")
+    val_df   = _load("val")
+    test_df  = _load("test")
+
+    print(f"  Manifest — train: {len(train_df)}, "
+          f"val: {len(val_df)}, test: {len(test_df)} (subset='{subset}')")
+    return train_df, val_df, test_df
 
 
-def extract_split(tracks: pd.DataFrame, split_name: str,
-                  label_enc, cache_dir: Path):
+def extract_split(
+    split_df: pd.DataFrame,
+    split_name: str,
+    label_enc,
+    cache_dir: Path,
+    subset: str = DEFAULT_SUBSET,
+) -> tuple[np.ndarray, np.ndarray]:
     """Extract or load cached MFCCs for one split.
+
+    Uses the ``filepath`` column from the manifest parquet directly, so no
+    path construction or ``get_audio_path`` call is needed.
 
     Returns (X, y) where:
       X : float32 ndarray  shape (N, 13, 2582)
       y : int32   ndarray  shape (N,)   — encoded genre class index
     """
     cache_dir.mkdir(parents=True, exist_ok=True)
-    x_path = cache_dir / f"mfcc_{split_name}.npy"
-    y_path = cache_dir / f"mfcc_{split_name}_labels.npy"
+    x_path = cache_dir / f"mfcc_{split_name}_{subset}.npy"
+    y_path = cache_dir / f"mfcc_{split_name}_{subset}_labels.npy"
 
     if x_path.exists() and y_path.exists():
         print(f"  Loading {split_name} from cache …")
@@ -161,25 +198,23 @@ def extract_split(tracks: pd.DataFrame, split_name: str,
         print(f"    X shape: {X.shape}, y shape: {y.shape}")
         return X, y
 
-    print(f"  Extracting MFCCs for split='{split_name}' …")
-    split_mask = tracks["set", "split"] == split_name
-    split_tracks = tracks[split_mask]
+    print(f"  Extracting MFCCs for split='{split_name}' (subset='{subset}') …")
 
     Xs, ys = [], []
     skipped = 0
     t0 = time.time()
-    for i, (track_id, row) in enumerate(split_tracks.iterrows()):
-        filepath = get_audio_path(AUDIO_DIR, track_id)
+    for i, (track_id, row) in enumerate(split_df.iterrows()):
+        filepath = Path(row["filepath"])   # already resolved by build_manifest
         mfcc = load_mfcc(filepath)
         if mfcc is None:
             skipped += 1
             continue
         Xs.append(mfcc)
-        ys.append(row["track", "genre_top"])
+        ys.append(row["genre_top"])        # flat column name in manifest
 
         if (i + 1) % 500 == 0:
             elapsed = time.time() - t0
-            print(f"    {i+1}/{len(split_tracks)} tracks processed "
+            print(f"    {i+1}/{len(split_df)} tracks processed "
                   f"({skipped} skipped), {elapsed:.0f}s elapsed")
 
     X = np.stack(Xs).astype(np.float32)
@@ -275,8 +310,7 @@ def main(epochs: int = 20, batch_size: int = 16, clear_cache: bool = False):
         print("  GPUs       : none detected → CPU fallback")
     print(f"  Epochs     : {epochs}")
     print(f"  Batch size : {batch_size}")
-    print(f"  Audio dir  : {AUDIO_DIR}")
-    print(f"  Metadata   : {METADATA_DIR}\n")
+    print(f"  Processed  : {PROCESSED_DIR}\n")
 
     # Optional cache clear
     if clear_cache and CACHE_DIR.exists():
@@ -284,11 +318,14 @@ def main(epochs: int = 20, batch_size: int = 16, clear_cache: bool = False):
         shutil.rmtree(CACHE_DIR)
         print("  Cache cleared.\n")
 
-    # ── Load metadata ────────────────────────────────────────────────────────
-    print("Loading metadata …")
-    tracks = load_metadata()
-    genre_classes = sorted(tracks["track", "genre_top"].unique().tolist())
-    n_classes = len(genre_classes)
+    # ── Load manifest split parquets ─────────────────────────────────────────
+    print("Loading manifest parquets …")
+    train_df, val_df, test_df = load_manifest_splits()
+    all_genres = sorted(
+        pd.concat([train_df, val_df, test_df])["genre_top"].unique().tolist()
+    )
+    n_classes = len(all_genres)
+    genre_classes = all_genres
     print(f"  Genres ({n_classes}): {genre_classes}")
 
     label_enc = LabelEncoder()
@@ -296,9 +333,9 @@ def main(epochs: int = 20, batch_size: int = 16, clear_cache: bool = False):
 
     # ── Extract / load MFCC splits ───────────────────────────────────────────
     print("\nExtracting MFCCs (or loading from cache) …")
-    X_train, y_train = extract_split(tracks, "training",   label_enc, CACHE_DIR)
-    X_val,   y_val   = extract_split(tracks, "validation", label_enc, CACHE_DIR)
-    X_test,  y_test  = extract_split(tracks, "test",       label_enc, CACHE_DIR)
+    X_train, y_train = extract_split(train_df, "training",   label_enc, CACHE_DIR)
+    X_val,   y_val   = extract_split(val_df,   "validation", label_enc, CACHE_DIR)
+    X_test,  y_test  = extract_split(test_df,  "test",       label_enc, CACHE_DIR)
 
     # Add channel dimension  (N, 13, 2582) → (N, 13, 2582, 1)
     X_train = X_train[..., np.newaxis]

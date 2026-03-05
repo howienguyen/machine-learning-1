@@ -26,14 +26,14 @@ Usage
         --min-duration 30 \\
         --decode-probe
 
-Outputs (written to --out-dir)
--------------------------------
-    metadata_manifest.parquet     all candidates with reason_code
-    train.parquet                 reason_code==OK, split==training
-    val.parquet                   reason_code==OK, split==validation
-    test.parquet                  reason_code==OK, split==test
-    metadata_manifest_config.json config snapshot (reproducibility)
-    metadata_manifest_report.txt  quality-gate summary
+Outputs (written to --out-dir, all names include the subset tag)
+----------------------------------------------------------------
+    metadata_manifest_{subset}.parquet     all candidates with reason_code
+    train_{subset}.parquet                 reason_code==OK, split==training
+    val_{subset}.parquet                   reason_code==OK, split==validation
+    test_{subset}.parquet                  reason_code==OK, split==test
+    metadata_manifest_config_{subset}.json config snapshot (reproducibility)
+    metadata_manifest_report_{subset}.txt  quality-gate summary
 
 Reason codes
 ------------
@@ -75,9 +75,10 @@ _MELCNN_DIR    = _SCRIPT_DIR.parent                       # …/MelCNN-MGR
 _WORKSPACE     = _MELCNN_DIR.parent                       # …/machine-learning-1
 
 DEFAULT_METADATA_ROOT = _WORKSPACE / "FMA" / "fma_metadata"
-DEFAULT_AUDIO_ROOT    = _WORKSPACE / "FMA" / "fma_medium"
 DEFAULT_OUT_DIR       = _MELCNN_DIR / "data" / "processed"
-DEFAULT_SUBSET        = "medium"
+DEFAULT_SUBSET        = "small"   # one of "small", "medium", "large"
+DEFAULT_AUDIO_ROOT    = _WORKSPACE / "FMA" / f"fma_{DEFAULT_SUBSET}"
+
 DEFAULT_MIN_DURATION  = 30       # seconds — standard FMA clip window
 
 # ── Multi-index column keys (tracks.csv uses a 2-level header) ────────────────
@@ -380,14 +381,14 @@ def _write_report(df: pd.DataFrame, ok: pd.DataFrame, path: Path, subset: Option
 def phase_d_write(df: pd.DataFrame, out_dir: Path, config: dict) -> None:
     """Write parquet files, config snapshot, and build report.
 
-    Outputs
-    -------
-    metadata_manifest.parquet     full table, all rows, stable sort by track_id
-    train.parquet                 OK + split==training
-    val.parquet                   OK + split==validation
-    test.parquet                  OK + split==test
-    metadata_manifest_config.json config snapshot
-    metadata_manifest_report.txt  quality-gate summary
+    Outputs (all filenames include the ``subset`` tag from ``config['subset']``)
+    ---------------------------------------------------------------------------
+    metadata_manifest_{subset}.parquet     full table, all rows, stable sort by track_id
+    train_{subset}.parquet                 OK + split==training
+    val_{subset}.parquet                   OK + split==validation
+    test_{subset}.parquet                  OK + split==test
+    metadata_manifest_config_{subset}.json config snapshot
+    metadata_manifest_report_{subset}.txt  quality-gate summary
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     logging.info("Phase D: writing outputs to %s", out_dir)
@@ -398,18 +399,17 @@ def phase_d_write(df: pd.DataFrame, out_dir: Path, config: dict) -> None:
     # Sort by track_id for reproducibility
     df_out = df_out.sort_index()
 
+    # Determine subset suffix for filenames
+    subset_name = config.get("subset") if isinstance(config, dict) else None
+    subset_suffix = f"_{subset_name}" if subset_name else ""
+
     # Full manifest
-    manifest_path = out_dir / "metadata_manifest.parquet"
+    manifest_path = out_dir / f"metadata_manifest{subset_suffix}.parquet"
     df_out.to_parquet(manifest_path, engine="pyarrow", index=True)
     logging.info("  %-40s (%d rows)", str(manifest_path), len(df_out))
 
     # Per-split parquets (OK rows only) — include target subset in filename
     ok = df_out[df_out["reason_code"] == "OK"]
-    subset_name = config.get("subset") if isinstance(config, dict) else None
-    if not subset_name:
-        subset_suffix = ""
-    else:
-        subset_suffix = f"_{subset_name}"
 
     split_files = [("train", "training"), ("val", "validation"), ("test", "test")]
     for fname, split_key in split_files:
@@ -420,14 +420,14 @@ def phase_d_write(df: pd.DataFrame, out_dir: Path, config: dict) -> None:
         logging.info("  %-40s (%d rows)", str(path), len(split_df))
 
     # Config snapshot
-    config_path = out_dir / "metadata_manifest_config.json"
+    config_path = out_dir / f"metadata_manifest_config{subset_suffix}.json"
     with open(config_path, "w") as fh:
         json.dump(config, fh, indent=2)
     logging.info("  %s", config_path)
 
     # Build report
-    report_path = out_dir / "metadata_manifest_report.txt"
-    _write_report(df_out, ok, report_path, config.get("subset"))
+    report_path = out_dir / f"metadata_manifest_report{subset_suffix}.txt"
+    _write_report(df_out, ok, report_path, subset_name)
     logging.info("  %s", report_path)
 
 
