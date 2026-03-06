@@ -1,0 +1,459 @@
+# Development Guideline: Adapting the Fixed-Length Log-Mel CNN Baseline from 30 Seconds to 10 Seconds
+
+Friday, March 6, 2026 6:07:03 PM
+
+## 1. Purpose of this document
+
+This document provides development guidance for adapting the current fixed-length log-mel CNN baseline from **30-second audio clips** to **10-second audio clips** while preserving the spirit of a **stable, reproducible baseline**.
+
+The immediate goal is not to build the most sophisticated or highest-performing system. The goal is to make a controlled change that is easy to reason about, easy to implement, and easy to compare against the existing 30-second baseline. In other words, we want a baseline that behaves like a well-trained lab instrument, not a caffeinated raccoon.
+
+This document first explains the problem, then summarizes alternative solution directions, and finally recommends **Strategy 1: deterministic center extraction** as the preferred solution for now.
+
+---
+
+## 2. Problem statement
+
+The current model is trained on **fixed-length 30-second audio clips**. This is not just a preference in the data pipeline; it is a structural assumption embedded into the feature extraction and model input shape.
+
+In this design:
+
+* each training sample is treated as a **single 30-second audio object**
+* the audio is transformed into a **fixed-size log-mel spectrogram**
+* the CNN is built to consume that **exact fixed shape**
+
+This means the baseline is a **true fixed-length system**. It is not length-flexible.
+
+Now the development question is:
+
+> How should 10-second training clips be derived from the current input clips, which are mostly 30 seconds long, while keeping the baseline stable and methodologically clean?
+
+That question matters because a 30-second clip contains more temporal content than a 10-second clip. Reducing the clip length is not merely “cutting data shorter.” It changes what part of the music the model sees, what genre cues remain available, and how much information each example contains.
+
+So the design choice is not just technical. It is methodological.
+
+---
+
+## 3. Core design objective
+
+The priority for the next baseline is:
+
+* **fixed-length**
+* **deterministic**
+* **reproducible**
+* **simple enough to explain and defend**
+* **close enough to the current 30s design to support fair comparison**
+
+Because of that, the safest direction is to continue using a **fixed-length input regime**, but redefine the sample unit from “30 seconds” to “10 seconds.”
+
+That means each original input clip must be converted into a derived **10-second clip**, and that 10-second clip becomes the actual model input for training, validation, and testing.
+
+---
+
+## 4. Overview of alternative solution directions
+
+Before selecting the final recommendation, it is useful to understand the main alternatives.
+
+### 4.1. Alternative A — Keep 30-second fixed length
+
+One option is to keep the current system exactly as it is.
+
+This has the advantage of maximum continuity and no pipeline changes. However, it does not support the new experimental goal of evaluating a shorter input duration. If the intention is to study whether 10-second clips can serve as a practical baseline, then staying at 30 seconds avoids the question rather than answering it.
+
+So this is the safest option operationally, but not the right option for the new objective.
+
+---
+
+### 4.2. Alternative B — Make the model length-flexible
+
+Another option is to redesign the architecture so it can accept variable-length audio or variable-width spectrograms.
+
+This is attractive in theory because it would allow the same model to process clips of different durations. However, this moves the project away from a strict baseline and into an architectural redesign. That adds complexity to the model, the data pipeline, and the interpretation of results.
+
+For the current stage, this is too large a jump. It changes not only clip duration, but also the modeling assumptions. That makes comparison with the existing baseline less clean.
+
+So while length-flexible modeling may be valuable later, it is not the preferred path for establishing the next stable baseline.
+
+---
+
+### 4.3. Alternative C — Derive one deterministic 10-second segment from each original clip
+
+This approach preserves the fixed-length philosophy. Each original clip produces exactly one derived 10-second clip using a deterministic rule. Examples include:
+
+* first 10 seconds
+* last 10 seconds
+* middle 10 seconds
+
+This is simple, stable, and easy to reproduce. It also keeps the number of derived examples roughly aligned with the number of original examples.
+
+Among deterministic single-segment approaches, the **middle 10 seconds** is generally the most robust because it avoids many problems associated with beginnings and endings, such as fade-in, silence, spoken intros, fade-out, and outro sections.
+
+This is the preferred family of solutions for now.
+
+---
+
+### 4.4. Alternative D — Derive multiple 10-second segments from each original clip
+
+Another option is to split each original 30-second clip into several fixed 10-second segments, such as:
+
+* 0–10 seconds
+* 10–20 seconds
+* 20–30 seconds
+
+This is also deterministic and fixed-length, and it increases the amount of training data. However, it changes the effective sample count and slightly changes the nature of the experiment. The model would see multiple training examples from each original track, which is no longer as directly comparable to the current “one clip, one example” setup.
+
+This can be a strong second-stage experiment, but it is not the cleanest first transition from the current 30-second baseline.
+
+---
+
+### 4.5. Alternative E — Random 10-second crop
+
+A random crop strategy samples a different 10-second region from the original clip each time or each run.
+
+This can improve diversity and may help generalization, but it introduces randomness into the baseline. Even with a fixed seed, it creates a more augmentation-oriented regime rather than a strict baseline.
+
+Since the priority here is stability and methodological cleanliness, this is not recommended for the immediate next step.
+
+---
+
+## 5. Final recommendation for now
+
+The recommended strategy is:
+
+# Strategy 1 — Deterministic center extraction to 10 seconds
+
+For each original input clip, derive exactly one **10-second clip** by using the **middle point of the original clip as the anchor**, then extracting a centered 10-second window around that anchor.
+
+This should be the default rule not only for exact 30-second clips, but more generally for any input clip whose duration is greater than 10 seconds.
+
+This gives a single, consistent principle:
+
+> If the clip is longer than 10 seconds, take the 10-second segment centered around the clip’s midpoint.
+
+This is a very sensible rule. It treats the middle of the clip as the anchor and avoids special-casing exact 30-second clips too aggressively. That makes the logic general, clean, and reusable.
+
+---
+
+## 6. Why Strategy 1 is recommended
+
+Strategy 1 is recommended because it best matches the current development priorities.
+
+### 6.1. It preserves baseline stability
+
+The method is deterministic. The same input clip will always produce the same derived 10-second clip. That makes the preprocessing stable and reproducible.
+
+### 6.2. It supports a clean comparison against the current baseline
+
+Only one major factor changes: the input duration. The overall philosophy remains fixed-length and shape-fixed. That makes the comparison more defensible.
+
+### 6.3. It avoids weak clip regions more often than first-10s or last-10s rules
+
+The beginning of a song can contain silence, fade-in, ambient lead-in, or spoken introduction. The ending can contain fade-out or low-information outro material. The center region is often a better representative slice of the music.
+
+### 6.4. It generalizes naturally to clips longer than 10 seconds but not exactly 30 seconds
+
+Using the midpoint as the anchor avoids awkward hand-built rules like “if 30 seconds do this, otherwise do something else.” One elegant geometric rule covers all cases above 10 seconds.
+
+It is the kind of rule that makes future you slightly less likely to curse past you.
+
+---
+
+## 7. Exact extraction policy
+
+The following policy should be adopted.
+
+### Case 1 — Original clip duration is greater than 10 seconds
+
+Let:
+
+* `D` = original clip duration in seconds
+* `TARGET = 10.0`
+* `MID = D / 2`
+
+Extract the centered 10-second window:
+
+* `start = MID - TARGET / 2`
+* `end = MID + TARGET / 2`
+
+So the derived clip spans:
+
+* `MID - 5s` to `MID + 5s`
+
+This is the main rule.
+
+#### Example: 30-second clip
+
+* `D = 30`
+* `MID = 15`
+* extract from `10` to `20`
+
+This matches the earlier recommendation of taking the middle 10 seconds.
+
+#### Example: 18-second clip
+
+* `D = 18`
+* `MID = 9`
+* extract from `4` to `14`
+
+#### Example: 12-second clip
+
+* `D = 12`
+* `MID = 6`
+* extract from `1` to `11`
+
+So the rule works naturally for any clip longer than 10 seconds.
+
+---
+
+### Case 2 — Original clip duration is exactly 10 seconds
+
+Use the clip as-is.
+
+No cropping and no padding are needed.
+
+---
+
+### Case 3 — Original clip duration is less than or equal to 10 seconds
+
+If the clip is shorter than 10 seconds, pad it with a **blank signal** so that the final derived clip is exactly 10 seconds long.
+
+In practice, “blank signal” should mean:
+
+* **zero-valued audio samples**
+* equivalent to digital silence
+
+This is the standard and most sensible meaning.
+
+#### Padding policy
+
+To stay consistent with the midpoint-centered logic used for longer clips, the preferred padding rule is:
+
+* place the original audio in the center
+* pad silence on the left and right as needed
+
+So if a clip is 8 seconds long:
+
+* total missing duration = 2 seconds
+* left pad = 1 second
+* right pad = 1 second
+
+If the missing duration is odd in sample count, the small remainder can go on the right side.
+
+This symmetric padding keeps the original clip centered inside the final 10-second window.
+
+That is conceptually neat because both long clips and short clips are treated with a “centered around the middle” philosophy.
+
+---
+
+## 8. Unified conceptual rule
+
+The whole policy can be summarized like this:
+
+> Normalize every input clip into an exact 10-second clip centered around the clip’s midpoint.
+> If the original clip is longer than 10 seconds, crop around the midpoint.
+> If it is shorter than 10 seconds, pad with silence around the midpoint.
+> If it is exactly 10 seconds, keep it unchanged.
+
+This is the cleanest formulation.
+
+---
+
+## 9. Practical implementation guidance
+
+### 9.1. Use decoded audio duration, not metadata duration alone
+
+If possible, base the extraction on the actual decoded waveform length rather than trusting metadata alone. File metadata can occasionally be messy, truncated, or slightly inconsistent.
+
+A robust implementation should determine the effective duration from the loaded signal and sample rate.
+
+---
+
+### 9.2. Work in samples, then convert from seconds carefully
+
+It is best to compute the extraction using sample indices.
+
+Let:
+
+* `sr` = sample rate
+* `target_samples = int(round(10.0 * sr))`
+
+Then:
+
+* compute the original number of samples
+* find the midpoint sample
+* derive the target start and end sample indices around that midpoint
+
+This avoids subtle drift from floating-point second arithmetic.
+
+---
+
+### 9.3. Handle boundary conditions safely
+
+For clips longer than 10 seconds, the centered crop should usually fit naturally. But in real code, always clamp boundaries carefully.
+
+For example:
+
+* if `start < 0`, clamp to `0`
+* if `end > len(signal)`, clamp to `len(signal)`
+
+Then pad if necessary to restore the exact target length.
+
+Even if your midpoint math is correct, defensive coding is still wise. Audio pipelines enjoy producing tiny edge-case gremlins.
+
+---
+
+### 9.4. Always enforce exact target length after extraction
+
+After cropping and/or padding, every derived waveform must be exactly:
+
+* `10.0 seconds`
+* or equivalently `target_samples`
+
+This is essential for keeping the downstream log-mel shape fixed.
+
+---
+
+## 10. Recommended waveform processing procedure
+
+A good procedure is:
+
+1. Load audio waveform.
+2. Resample to the project sample rate if needed.
+3. Convert to mono if that is already the baseline convention.
+4. Compute `target_samples = 10s * sr`.
+5. If waveform length is greater than `target_samples`, center-crop.
+6. If waveform length is less than `target_samples`, center-pad with zeros.
+7. If waveform length equals `target_samples`, keep unchanged.
+8. Pass the normalized waveform to the log-mel extraction pipeline.
+
+This keeps the 10-second normalization as a clear preprocessing stage.
+
+---
+
+## 11. Pseudocode for the recommended logic
+
+```python
+import numpy as np
+
+def normalize_to_fixed_10s(y, sr, target_sec=10.0):
+    target_len = int(round(target_sec * sr))
+    n = len(y)
+
+    if n == target_len:
+        return y
+
+    if n > target_len:
+        mid = n // 2
+        half = target_len // 2
+        start = mid - half
+        end = start + target_len
+
+        # clamp defensively
+        if start < 0:
+            start = 0
+            end = target_len
+        if end > n:
+            end = n
+            start = n - target_len
+
+        y_out = y[start:end]
+        return y_out
+
+    # n < target_len -> center pad with silence
+    pad_total = target_len - n
+    pad_left = pad_total // 2
+    pad_right = pad_total - pad_left
+
+    y_out = np.pad(y, (pad_left, pad_right), mode="constant")
+    return y_out
+```
+
+This captures the intended behavior clearly.
+
+---
+
+## 12. Implications for the rest of the pipeline
+
+Once the waveform is normalized to exactly 10 seconds, the rest of the pipeline must be updated consistently.
+
+### 12.1. Log-mel frame count will change
+
+A 10-second clip will produce fewer time frames than a 30-second clip. So the fixed log-mel shape must be recalculated for 10 seconds.
+
+This new shape should be measured from the actual extraction pipeline rather than guessed.
+
+### 12.2. The model input shape must change accordingly
+
+Since the CNN expects a fixed spectrogram shape, the model input dimensions must be updated to match the new 10-second log-mel tensor.
+
+### 12.3. Cache directories should be separated
+
+Do not mix 30-second and 10-second cached features in the same cache location. They represent different shapes and different preprocessing assumptions.
+
+Use separate paths such as:
+
+* `logmel_30s`
+* `logmel_10s`
+
+This prevents subtle cache poisoning.
+
+### 12.4. Training, validation, and testing should all use the same derivation rule
+
+For baseline consistency, the exact same 10-second normalization rule should be used across:
+
+* training
+* validation
+* test
+* inference
+
+Do not use center cropping in training and some other rule in inference. That would create a train-test mismatch for no good reason.
+
+---
+
+## 13. Why not choose multiple 10-second segments right now?
+
+Using three segments per 30-second clip is a valid next experiment, but it is not the first recommendation because it changes more than just duration.
+
+With three derived segments per clip:
+
+* the number of training examples increases
+* each track contributes multiple examples
+* the experiment becomes more than just “30s vs 10s”
+
+That approach can absolutely be valuable later. But for now, the cleaner question is:
+
+> What happens if the baseline remains fixed-length and deterministic, but each sample becomes a single centered 10-second clip instead of a 30-second clip?
+
+That is the most controlled next step.
+
+---
+
+## 14. Final recommendation
+
+The development recommendation is to adopt the following rule as the next baseline preprocessing policy:
+
+> Convert every input clip into an exact 10-second waveform centered around the clip midpoint.
+> If the clip is longer than 10 seconds, center-crop to 10 seconds.
+> If the clip is shorter than 10 seconds, center-pad with silent samples until it reaches 10 seconds.
+> If the clip is exactly 10 seconds, leave it unchanged.
+
+This strategy is recommended because it is:
+
+* fixed-length
+* deterministic
+* reproducible
+* conceptually simple
+* aligned with the current baseline philosophy
+* easy to document and defend
+
+It is the right “boring in the good way” choice for now.
+
+---
+
+## 15. Suggested next implementation milestone
+
+The immediate next implementation milestone should be:
+
+**Introduce a waveform normalization function that converts every input clip to exact 10-second centered audio before log-mel extraction, then update the derived log-mel shape and CNN input shape accordingly.**
+
+That gives you a crisp engineering checkpoint and a methodologically clean baseline transition.

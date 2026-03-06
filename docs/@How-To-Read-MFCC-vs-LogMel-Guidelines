@@ -1,0 +1,229 @@
+Thu Mar  5 00:00:00 UTC 2026
+
+# How To Read MFCC vs Log-mel Baseline Results
+
+This guide explains how to interpret outputs from:
+
+* `MelCNN-MGR/notebooks/baseline_mfcc_cnn_v5.ipynb` (MFCC baseline)
+* `MelCNN-MGR/notebooks/baseline_logmel_cnn_v1.ipynb` (Log-mel baseline)
+
+Primary objective: compare the two **input representations** fairly under the same pipeline/model recipe.
+
+---
+
+## 1) What Is a Fair Comparison Here?
+
+Treat this as a controlled ablation where input representation (LogMel vs MFCC) is the only intended variable.
+
+Keep these fixed across the two notebooks:
+
+* dataset split (`train/val/test` from the same subset)
+* train recipe (optimizer, LR, epochs, batch size)
+* model architecture pattern
+* preprocessing policy (train-only normalization)
+* reproducibility setup (`SEED`, seeded `shuffle`)
+
+If any of these differ, you are no longer measuring representation effect only.
+
+---
+
+## 2) Minimal Run Hygiene Before Interpreting Metrics
+
+Before comparing results, verify both runs used comparable settings:
+
+1. Same `SUBSET` in both notebooks.
+2. Same `EPOCHS`, `BATCH_SIZE`, and optimizer config.
+3. Same `SEED` strategy applied (`random`, `numpy`, `tensorflow`, and `ds.shuffle(seed=SEED, ...)`).
+4. No major data-path anomalies in logs (decode failures, corrupt cache churn dominating one run).
+
+If one run had unusual data issues and the other did not, treat the comparison as low confidence.
+
+---
+
+## 3) Where to Read Results in Each Notebook
+
+In both notebooks, focus on the same sections:
+
+1. **Training History section**:
+	* train vs validation accuracy/loss curves
+	* signs of overfitting/underfitting
+
+2. **Evaluation section**:
+	* per-split Accuracy + Macro-F1
+	* per-genre metrics from classification report
+
+3. **Confusion Matrix section**:
+	* class-to-class confusion structure
+
+4. **Run report JSON (saved artifact)**:
+	* stable source of metrics for side-by-side comparison table
+
+Do not base conclusions on a single plot alone; always cross-check with report metrics.
+
+---
+
+## 4) Metric Reading Order (Recommended)
+
+Use this order every time:
+
+1. **Macro-F1 (primary)**
+2. **Per-class F1 / recall distribution**
+3. **Confusion matrix patterns**
+4. **Accuracy (secondary)**
+
+Why this order:
+
+* FMA genres are imbalanced; Macro-F1 better reflects balanced competence.
+* Accuracy can look good even when minority genres are weak.
+
+---
+
+## 5) How to Interpret Common Outcomes
+
+### Case A: Log-mel Macro-F1 > MFCC, Accuracy similar
+
+Interpretation: likely better minority-genre handling from richer time-frequency detail.
+This is usually the strongest evidence that representation matters.
+
+### Case B: MFCC and Log-mel both close on Macro-F1 and Accuracy
+
+Interpretation: representation effect is small under current model/training budget.
+Possible reasons:
+
+* model capacity too small to exploit extra log-mel detail
+* optimization budget insufficient
+* genre boundaries dominated by coarse spectral envelope cues
+
+### Case C: One model wins Accuracy, loses Macro-F1
+
+Interpretation: winner is likely biased toward majority classes.
+For this project, prefer the model with better Macro-F1 unless product objective explicitly prioritizes raw accuracy.
+
+### Case D: Better validation but weaker test
+
+Interpretation: likely overfitting or split-specific behavior.
+Use test metrics as the final decision point for baseline comparison.
+
+---
+
+## 6) Confusion Matrix Reading Tips
+
+Look for these signals:
+
+* **Diagonal strength**: stronger diagonal generally means better class separation.
+* **Pairwise confusions**: repeated off-diagonal pairs show systematic genre overlap.
+* **Minority collapse**: rare genres being mapped into 1-2 majority genres.
+
+When comparing MFCC vs Log-mel confusion matrices:
+
+* Ask whether log-mel reduces specific recurring confusions.
+* Check if improvements are broad (many classes) or concentrated (few classes).
+
+Prefer broad improvements across multiple genres over a gain in one genre only.
+
+---
+
+## 7) Per-Genre Interpretation Pattern
+
+For each genre, compare:
+
+* `F1_logmel - F1_mfcc`
+* `Recall_logmel - Recall_mfcc`
+
+Then classify each genre as:
+
+* improved
+* unchanged
+* regressed
+
+Final readout should answer:
+
+* Are gains mostly on minority genres?
+* Are regressions concentrated on any critical genre?
+* Is net improvement robust or fragile?
+
+---
+
+## 8) Suggested Comparison Table Template
+
+Use one consolidated table in your report:
+
+| Metric | MFCC | Log-mel | Delta (Log-mel - MFCC) |
+| --- | ---: | ---: | ---: |
+| Test Accuracy | | | |
+| Test Macro-F1 | | | |
+| Val Accuracy | | | |
+| Val Macro-F1 | | | |
+| Worst per-class F1 | | | |
+| Median per-class F1 | | | |
+
+Then add a second compact table for top per-genre deltas:
+
+| Genre | F1 MFCC | F1 Log-mel | Delta |
+| --- | ---: | ---: | ---: |
+| ... | ... | ... | ... |
+
+---
+
+## 9) Decision Rule for Goal-1 Baseline Conclusion
+
+Use this practical rule:
+
+1. Pick the representation with higher **test Macro-F1**.
+2. If Macro-F1 is near-tied, use:
+	* per-genre robustness (fewer severe regressions)
+	* confusion-matrix quality
+	* training stability indicators
+3. Use Accuracy only as a tie-breaker, not the primary criterion.
+
+This keeps conclusions aligned with imbalance-aware evaluation.
+
+---
+
+## 10) Common Interpretation Mistakes to Avoid
+
+1. Declaring a winner from Accuracy alone.
+2. Comparing runs with different subset/config and calling it representation effect.
+3. Ignoring per-genre regressions because global metrics improved.
+4. Over-interpreting a single run when randomness/data anomalies are present.
+5. Mixing train/val behavior with test conclusions.
+
+---
+
+## 11) Corrupt or Unreadable Tracks in Splits
+
+A split's nominal size (e.g. 800 test tracks) may not equal the number of tracks
+that actually reach the model. Tracks are silently dropped when:
+
+* the source MP3 cannot be decoded (corrupt file, truncated download)
+* the decoded audio is too short, empty, or has non-finite samples
+* a cached `.npy` feature file is corrupt or has the wrong shape
+
+The extraction step (`Section 4` in each notebook) reports "Usable rows" at the
+end — compare these numbers against the manifest totals to see if any tracks were
+skipped.
+
+**Impact on evaluation:** if tracks are skipped non-uniformly across genres or
+splits, the reported metrics are computed on a biased subset and cannot be
+compared fairly between runs. Always check usable-row counts before interpreting
+results.
+
+**What the log-mel notebook does:** if corrupt `.npy` files are found after an
+initial build, the cache step re-extracts those tracks in the same run rather than
+deferring to the next execution, so the final usable count is as high as the source
+audio files allow.
+
+---
+
+## 12) What Was Implemented in Current Baselines
+
+Both notebooks now include the key comparison safeguards:
+
+* seeded reproducibility (`SEED = 42` + Python/NumPy/TensorFlow seeds)
+* deterministic train shuffle (`ds.shuffle(..., seed=SEED, reshuffle_each_iteration=True)`)
+* imbalance-aware reporting (Accuracy, Macro-F1, per-class metrics, confusion matrix)
+* structured metrics persisted in run report JSON for side-by-side analysis
+* corrupt/unreadable tracks are dropped and reported; log-mel run also re-extracts
+  them immediately (see Section 11)
+
+This means the two notebooks are ready to support a controlled MFCC-vs-Log-mel interpretation workflow.
