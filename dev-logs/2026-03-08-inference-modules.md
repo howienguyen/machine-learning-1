@@ -2,13 +2,16 @@
 
 ## Scope
 
-This log covers the development of standalone, reusable inference modules for both
-trained models in the MelCNN-MGR project:
+This log covers the development of standalone, reusable inference modules for each
+trained model in the MelCNN-MGR project:
 
 1. Renamed existing logmel v20a inference files for clarity.
 2. Added `norm_stats.npz` persistence to `baseline_mfcc_cnn_v5.ipynb`.
 3. Created `inference_mfcc_v5.py` — inference module for the MFCC CNN v5 baseline.
 4. Created `inference_mfcc_v5_example.py` — CLI example for the MFCC CNN v5 module.
+5. Added `norm_stats.npz` persistence to `baseline_logmel_cnn_v10.ipynb`.
+6. Created `inference_logmel_v10.py` — inference module for the Log-Mel CNN v10 baseline.
+7. Created `inference_logmel_v10_example.py` — CLI example for the Log-Mel CNN v10 module.
 
 ---
 
@@ -166,27 +169,129 @@ python MelCNN-MGR/examples/inference_mfcc_v5_example.py \
 MelCNN-MGR/
     inference_logmel_v20a.py          ← logmel v20a inference module (renamed)
     inference_mfcc_v5.py              ← MFCC v5 inference module     [NEW]
+    inference_logmel_v10.py           ← logmel v10 inference module  [NEW]
     examples/
         inference_logmel_v20a_example.py   ← logmel v20a CLI example (renamed)
         inference_mfcc_v5_example.py       ← MFCC v5 CLI example     [NEW]
+        inference_logmel_v10_example.py    ← logmel v10 CLI example  [NEW]
     notebooks/
         baseline_logmel_cnn_v20a.py   ← training script (unchanged)
         baseline_mfcc_cnn_v5.ipynb    ← training notebook (norm_stats.npz added)
+        baseline_logmel_cnn_v10.ipynb ← training notebook (norm_stats.npz added)
 ```
 
 ---
 
-## Difference table — logmel v20a vs MFCC v5 inference modules
+## Change 5 — Save `norm_stats.npz` in `baseline_logmel_cnn_v10.ipynb`
 
-| Aspect | `inference_logmel_v20a.py` | `inference_mfcc_v5.py` |
-|---|---|---|
-| Feature | Log-mel spectrogram | MFCC (13 coefficients) |
-| Feature shape | (128, 861) | (13, 2582) |
-| Clip duration | 10 s | 30 s |
-| Default mode | `three_crop` | `single_crop` |
-| Model file | `baseline_logmel_cnn_v20a.keras` | `baseline_mfcc_cnn.keras` |
-| Run dir prefix | `logmel-cnn-v20a-*` | `mfcc-cnn-*` |
-| Inference class | `MelCNNInference` | `MFCCCNNInference` |
+### Problem
+`baseline_logmel_cnn_v10.ipynb` computed per-band µ/σ normalization stats from
+the training data but never wrote them to disk.  Without these stats, re-running
+inference against unseen audio would require executing the full training notebook
+to recover `mu` and `std`.
+
+### Fix
+Section 7 (Compile & Train) of the notebook now saves a `norm_stats.npz` file
+immediately after the model `.keras` file:
+
+```python
+_norm_path = RUN_DIR / "norm_stats.npz"
+np.savez(str(_norm_path), mu=mu, std=std, genre_classes=np.array(GENRE_CLASSES))
+print(f"Norm stats   -> {_norm_path}")
+```
+
+### Run directory layout after this change
+
+```
+MelCNN-MGR/models/logmel-cnn-v10-YYYYMMDD-HHMMSS/
+    baseline_logmel_cnn_v10.keras  ← Keras model weights + architecture
+    norm_stats.npz                 ← mu (1,128,1,1), std (1,128,1,1), genre_classes [NEW]
+    run_report_<subset>.json       ← config, training history, evaluation metrics
+```
+
+---
+
+## Change 6 — `MelCNN-MGR/inference_logmel_v10.py`
+
+A new standalone inference module for the Log-Mel CNN v10 baseline.
+
+### Public API
+
+```python
+from inference_logmel_v10 import LogMelV10Inference, PredictionResult
+
+engine = LogMelV10Inference("MelCNN-MGR/models/logmel-cnn-v10-20260308-120000")
+
+# Single-crop prediction (default)
+result = engine.predict("path/to/song.mp3")
+print(result.genre, result.confidence)
+
+# Three-crop prediction (3 deterministic 30s crops, averaged)
+result = engine.predict("path/to/song.mp3", mode="three_crop")
+
+# Batch prediction
+results = engine.predict_batch(["a.mp3", "b.mp3", "c.mp3"])
+
+# Top-k genres
+for genre, prob in result.top_k(3):
+    print(genre, prob)
+```
+
+### Key constants (must match training in v10 notebook)
+
+| Constant | Value |
+|---|---|
+| `SAMPLE_RATE` | 22 050 Hz |
+| `N_MELS` | 128 |
+| `N_FFT` | 512 |
+| `HOP_LENGTH` | 256 |
+| `CLIP_DURATION` | 30.0 s |
+| `N_FRAMES` | 2582 |
+| `LOGMEL_SHAPE` | (128, 2582) |
+
+### Default prediction mode
+
+`single_crop` is the default.  Rationale: v10 was trained on full 30 s clips
+(no crop augmentation), so the full-clip single-crop is the canonical input.
+
+---
+
+## Change 7 — `MelCNN-MGR/examples/inference_logmel_v10_example.py`
+
+CLI demonstration script.
+
+### Usage
+
+```bash
+# Predict on specific files
+python MelCNN-MGR/examples/inference_logmel_v10_example.py \
+    --run-dir MelCNN-MGR/models/logmel-cnn-v10-20260308-120000 \
+    --files song1.mp3 song2.mp3 song3.mp3
+
+# Random samples from the test manifest
+python MelCNN-MGR/examples/inference_logmel_v10_example.py \
+    --run-dir MelCNN-MGR/models/logmel-cnn-v10-20260308-120000 \
+    --subset small --random 5
+
+# Three-crop mode
+python MelCNN-MGR/examples/inference_logmel_v10_example.py \
+    --run-dir MelCNN-MGR/models/logmel-cnn-v10-20260308-120000 \
+    --subset small --random 3 --mode three_crop
+```
+
+---
+
+## Difference table — logmel v20a vs MFCC v5 vs logmel v10 inference modules
+
+| Aspect | `inference_logmel_v20a.py` | `inference_mfcc_v5.py` | `inference_logmel_v10.py` |
+|---|---|---|---|
+| Feature | Log-mel spectrogram | MFCC (13 coefficients) | Log-mel spectrogram |
+| Feature shape | (128, 861) | (13, 2582) | (128, 2582) |
+| Clip duration | 10 s | 30 s | 30 s |
+| Default mode | `three_crop` | `single_crop` | `single_crop` |
+| Model file | `baseline_logmel_cnn_v20a.keras` | `baseline_mfcc_cnn.keras` | `baseline_logmel_cnn_v10.keras` |
+| Run dir prefix | `logmel-cnn-v20a-*` | `mfcc-cnn-*` | `logmel-cnn-v10-*` |
+| Inference class | `MelCNNInference` | `MFCCCNNInference` | `LogMelV10Inference` |
 
 —
 Generated during March 8, 2026 session.
