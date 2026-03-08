@@ -1,71 +1,54 @@
 # %% [markdown]
-# # FMA Baseline - Log-Mel → 2D CNN (Version 20a)
+# # FMA Baseline - Log-Mel → 2D CNN (Version 20a1)
 #
-# **Quality-improved 10-second baseline** — upgrades v20 with class weights,
-# milder temporal pooling, SpecAugment, AdamW optimizer, label smoothing,
-# and 3-crop inference.
+# **Accuracy-focused upgrade** — builds on v20a with deeper architecture,
+# reduced mel bands, cosine LR schedule, and improved regularization.
 #
-# Built on top of `baseline_logmel_cnn_v20.ipynb` (deterministic center-crop,
-# 10-second clips). All spectrogram extraction and cache logic is identical to v20;
-# only the training pipeline, model pooling, and inference strategy change.
-#
-# Key improvements over v20:
-# - **Class weights** — handle genre imbalance via `compute_class_weight("balanced")`
-# - **Milder temporal pooling** — MaxPool `(2,2)` × 4 instead of `(2,4)` × 3 + `(2,2)`
-# - **SpecAugment** — random frequency + time masking during training only
-# - **AdamW** optimizer with decoupled weight decay (`1e-4`)
-# - **Label smoothing** (`0.05`) for cross-entropy loss
-# - **3-crop inference** — deterministic early/middle/late crops with averaged probabilities
+# Key improvements over v20a:
+# - **Deeper architecture** — 5 conv blocks (32→64→128→256→256), +SpatialDropout2D
+# - **Proper BN ordering** — Conv (linear) → BN → ReLU instead of Conv(ReLU) → BN
+# - **N_MELS 256→128** — smoother frequency representation, faster training
+# - **SpecAugment** — freq_mask=15, time_mask=25, num_masks=2 (unchanged from v20a)
+# - **Cosine annealing LR** with 3-epoch warmup (replaces ReduceLROnPlateau)
+# - **Batch size 16→32** — more stable gradients
+# - **EarlyStopping re-enabled** (patience=9, restore_best_weights=True)
+# - **_MacroF1Checkpoint** — persist best val_macro_f1 weights to disk
 #
 # References:
 # - `docs/Implementation Guide - baseline_logmel_cnn_v20a.md`
 # - `docs/Proposed Quality Improvement Plan for baseline_logmel_cnn_v20.ipynb.md`
-# - `MelCNN-MGR/notebooks/baseline_logmel_cnn_v20.ipynb`
+# - `MelCNN-MGR/notebooks/baseline_logmel_cnn_v20a.py`
 # - `docs/Final-Project-Proposal.md`
 
 # %% [markdown]
-# ## Changelog — v20 → v20a
+# ## Changelog — v20a → v20a1
 #
 # | # | Section | What changed | Why |
 # |---|---------|-------------|-----|
-# | 1 | Config | Cache dir `logmel_v20_10s → logmel_v20a_10s` | Separate cache namespace |
-# | 2 | Config | Index parquets prefixed `logmel_v20a_10s_index_*` | Prevent collision with v20 index files |
-# | 3 | Config | Added `LABEL_SMOOTHING = 0.05` | Configurable label smoothing |
-# | 4 | Config | Added `WEIGHT_DECAY = 1e-4` | Configurable AdamW weight decay |
-# | 5 | Preprocessing (Section 5) | Added `spec_augment()` in training pipeline | SpecAugment for training-time robustness |
-# | 6 | Preprocessing (Section 5) | Added class-weight computation | Handle genre imbalance in training loss |
-# | 7 | Model (Section 6) | MaxPool changed from `(2,4),(2,4),(2,4),(2,2)` to `(2,2)` × 4 | Milder temporal pooling |
-# | 8 | Compile (Section 7) | `Adam → AdamW(weight_decay=1e-4)` | Decoupled weight decay regularization |
-# | 9 | Compile (Section 7) | Loss → `CategoricalCrossentropy(label_smoothing=0.05)` | Reduce overconfidence |
-# | 10 | Train (Section 7) | `model.fit(class_weight=class_weight_dict)` | Imbalance-aware training |
-# | 11 | Inference (Section 10) | 3 deterministic crops + averaged probabilities | More robust prediction |
-# | 12 | Run report | Updated version, added new config fields | Accurate metadata |
+# | 1 | Config | `N_MELS` 256 → 128 | Smoother frequency representation; 256 was near-1:1 with FFT bins |
+# | 2 | Config | `BATCH_SIZE` 16 → 32 | More stable gradients |
+# | 3 | Config | SpecAugment unchanged (15/25/2) | Kept v20a params; no coverage change in this version |
+# | 4 | Config | Cache dir `logmel_v20a1_10s` | Separate namespace (different N_MELS) |
+# | 5 | Model (Section 6) | 5 conv blocks (32→64→128→256→256) | Deeper capacity for 16-class task |
+# | 6 | Model (Section 6) | BN ordering: Conv(linear)→BN→ReLU | Normalize pre-activation values |
+# | 7 | Model (Section 6) | SpatialDropout2D(0.10) after blocks 2 & 3 | Regularize intermediate feature maps |
+# | 8 | Compile (Section 7) | Cosine annealing LR with 3-epoch warmup | Smoother convergence vs ReduceLROnPlateau |
+# | 9 | Compile (Section 7) | EarlyStopping re-enabled (patience=9) | Stop overfitting, restore best weights |
+# | 10 | Compile (Section 7) | _MacroF1Checkpoint added | Persist best val_macro_f1 model to disk |
 #
-# ### Training behavior: v20 vs v20a
+# ### Training behavior: v20a vs v20a1
 #
-# | Aspect | v20 | v20a |
-# |--------|-----|------|
-# | Optimizer | `Adam(lr=1e-3)` | `AdamW(lr=1e-3, weight_decay=1e-4)` |
-# | Loss | `categorical_crossentropy` | `CategoricalCrossentropy(label_smoothing=0.05)` |
-# | Class weights | None | Balanced, computed from training split |
-# | Augmentation | None | SpecAugment (freq + time masking, training only) |
-# | Pooling | (2,4), (2,4), (2,4), (2,2) | (2,2) × 4 |
-# | Inference | Single center-crop | 3 deterministic crops, averaged probabilities |
-#
-# ### Architecture comparison: pooling behavior
-#
-# | Block | v20 pool | v20a pool | v20 time dim after pool | v20a time dim after pool |
-# |-------|----------|-----------|------------------------|-------------------------|
-# | 1 | (2, 4) | (2, 2) | 861 → 215 | 861 → 430 |
-# | 2 | (2, 4) | (2, 2) | 215 → 53 | 430 → 215 |
-# | 3 | (2, 4) | (2, 2) | 53 → 13 | 215 → 107 |
-# | 4 | (2, 2) | (2, 2) | 13 → 6 | 107 → 53 |
-#
-# **v20 pre-GAP feature map:** `(8, 6, 128)` = 6,144 values per sample
-# **v20a pre-GAP feature map:** `(8, 53, 128)` = 54,272 values per sample
-#
-# The time axis retains ~9× more resolution before global averaging.
-# Parameter count is **identical** (pooling layers have no trainable parameters).
+# | Aspect | v20a | v20a1 |
+# |--------|------|-------|
+# | N_MELS | 256 | 128 |
+# | Batch size | 16 | 32 |
+# | Architecture | 4 blocks (32→64→128→128) | 5 blocks (32→64→128→256→256) |
+# | BN ordering | Conv(ReLU)→BN | Conv(linear)→BN→ReLU |
+# | SpatialDropout | None | 0.10 after blocks 2 & 3 |
+# | SpecAugment | freq=15, time=25, masks=2 | freq=15, time=25, masks=2 (unchanged) |
+# | LR schedule | ReduceLROnPlateau(patience=3) | Cosine annealing + 3-epoch warmup |
+# | EarlyStopping | Disabled | Enabled (patience=9) |
+# | ModelCheckpoint | None | _MacroF1Checkpoint (saves best val_macro_f1) |
 
 # %% [markdown]
 # ## 1. Imports
@@ -154,16 +137,16 @@ LOGMEL_CACHE_DIR = CACHE_DIR / "logmel_v20a_10s" / ("shared" if LOGMEL_CACHE_SHA
 
 # -- Training hyperparameters --------------------------------------------------
 EPOCHS        = 60
-BATCH_SIZE    = 16
+BATCH_SIZE    = 32
 
 # -- v20a improvements ---------------------------------------------------------
-LABEL_SMOOTHING = 0.05          # label smoothing for cross-entropy loss
+LABEL_SMOOTHING = 0.02          # label smoothing for cross-entropy loss
 WEIGHT_DECAY    = 1e-4          # AdamW decoupled weight decay
 
 # -- SpecAugment parameters ----------------------------------------------------
-SPEC_AUG_FREQ_MASK  = 15       # max frequency bands to mask
-SPEC_AUG_TIME_MASK  = 25       # max time frames to mask
-SPEC_AUG_NUM_MASKS  = 2        # number of masks per axis
+SPEC_AUG_FREQ_MASK  = 15       # max frequency bands to mask  (unchanged from v20a)
+SPEC_AUG_TIME_MASK  = 25       # max time frames to mask      (unchanged from v20a)
+SPEC_AUG_NUM_MASKS  = 2        # number of masks per axis     (unchanged from v20a)
 
 # -- Log-mel extraction params -------------------------------------------------
 SAMPLE_RATE   = 22050
@@ -617,7 +600,7 @@ def build_logmel_index(
     clear_cache: bool = False,
 ) -> pd.DataFrame:
     cache_dir.mkdir(parents=True, exist_ok=True)
-    index_path = CACHE_DIR / f"logmel_v20a_10s_index_{split_name}_{SUBSET}.parquet"
+    index_path = CACHE_DIR / f"logmel_v20a1_10s_index_{split_name}_{SUBSET}.parquet"
 
     if clear_cache:
         if cache_dir.exists():
@@ -725,7 +708,7 @@ def _reextract_corrupt(
 
 def _purge_and_repair(full_index: pd.DataFrame, split_name: str) -> pd.DataFrame:
     """Purge corrupt cache entries and immediately re-extract them in the same run."""
-    index_path = CACHE_DIR / f"logmel_v20a_10s_index_{split_name}_{SUBSET}.parquet"
+    index_path = CACHE_DIR / f"logmel_v20a1_10s_index_{split_name}_{SUBSET}.parquet"
     clean_df, corrupt_df = _purge_corrupt(_usable(full_index), LOGMEL_SHAPE)
     repaired_df = _reextract_corrupt(corrupt_df, full_index, index_path)
     return pd.concat([clean_df, repaired_df]).reset_index(drop=True)
@@ -838,9 +821,11 @@ def spec_augment(x, freq_mask=SPEC_AUG_FREQ_MASK, time_mask=SPEC_AUG_TIME_MASK,
     time_dim = shape[1]   # N_FRAMES = 861
 
     for _ in range(num_masks):
-        # Frequency mask
-        f = tf.random.uniform([], 0, freq_mask, dtype=tf.int32)
-        f0 = tf.random.uniform([], 0, freq_dim - f, dtype=tf.int32)
+        # Frequency mask — clamp mask size to actual dimension so config changes
+        # (e.g. reducing N_MELS) never produce invalid upper bounds for uniform sampling.
+        f_max = tf.minimum(freq_mask, freq_dim)
+        f  = tf.random.uniform([], 0, f_max + 1, dtype=tf.int32)
+        f0 = tf.random.uniform([], 0, tf.maximum(freq_dim - f, 1), dtype=tf.int32)
         freq_mask_tensor = tf.concat([
             tf.ones([f0, time_dim, 1]),
             tf.zeros([f, time_dim, 1]),
@@ -848,9 +833,10 @@ def spec_augment(x, freq_mask=SPEC_AUG_FREQ_MASK, time_mask=SPEC_AUG_TIME_MASK,
         ], axis=0)
         x = x * freq_mask_tensor
 
-        # Time mask
-        t = tf.random.uniform([], 0, time_mask, dtype=tf.int32)
-        t0 = tf.random.uniform([], 0, time_dim - t, dtype=tf.int32)
+        # Time mask — same clamping for time axis.
+        t_max = tf.minimum(time_mask, time_dim)
+        t  = tf.random.uniform([], 0, t_max + 1, dtype=tf.int32)
+        t0 = tf.random.uniform([], 0, tf.maximum(time_dim - t, 1), dtype=tf.int32)
         time_mask_tensor = tf.concat([
             tf.ones([freq_dim, t0, 1]),
             tf.zeros([freq_dim, t, 1]),
@@ -898,20 +884,17 @@ print(f"\nPreprocessing : {_section_times['5. Preprocessing']:.2f}s")
 # %% [markdown]
 # ## 6. Build the CNN Model
 #
-# Same v20 architecture (local convolution kernels with hierarchical pooling),
-# but with **milder temporal pooling** — all four MaxPool layers use `(2, 2)` instead
-# of `(2, 4)` in blocks 1–3. This preserves ~9× more temporal resolution before GAP.
+# Deeper v20a1 architecture with 5 conv blocks, proper BN ordering
+# (Conv→BN→ReLU), SpatialDropout2D, and increased filter capacity.
 #
-# | Block | Layer | Kernel | Pool | Output shape |
-# |-------|-------|--------|------|-------------|
-# | 1 | Conv2D(32) + BN + MaxPool(2,2) | (5,5) | (2,2) | (64, 430, 32) |
-# | 2 | Conv2D(64) + BN + MaxPool(2,2) | (3,3) | (2,2) | (32, 215, 64) |
-# | 3 | Conv2D(128) + BN + MaxPool(2,2) | (3,3) | (2,2) | (16, 107, 128) |
-# | 4 | Conv2D(128) + BN + MaxPool(2,2) | (3,3) | (2,2) | (8, 53, 128) |
-# | Head | GAP + Dropout(0.3) + Dense | — | — | (N_CLASSES,) |
-#
-# GlobalAveragePooling2D absorbs the larger spatial dimensions automatically.
-# Parameter count is identical to v20.
+# | Block | Layer | Kernel | Pool | Output shape (128×861 input) |
+# |-------|-------|--------|------|-------------------------------|
+# | 1 | Conv2D(32) + BN + ReLU + MaxPool(2,2) | (5,5) | (2,2) | (64, 430, 32) |
+# | 2 | Conv2D(64) + BN + ReLU + SpatialDrop(0.10) + MaxPool(2,2) | (3,3) | (2,2) | (32, 215, 64) |
+# | 3 | Conv2D(128) + BN + ReLU + SpatialDrop(0.10) + MaxPool(2,2) | (3,3) | (2,2) | (16, 107, 128) |
+# | 4 | Conv2D(256) + BN + ReLU + MaxPool(2,2) | (3,3) | (2,2) | (8, 53, 256) |
+# | 5 | Conv2D(256) + BN + ReLU + MaxPool(2,2) | (3,3) | (2,2) | (4, 26, 256) |
+# | Head | GAP + Dropout(0.2) + Dense | — | — | (N_CLASSES,) |
 
 # %%
 _t0 = _time_module.perf_counter()
@@ -920,31 +903,43 @@ def build_model(n_classes: int) -> keras.Model:
     inputs = keras.Input(shape=(*LOGMEL_SHAPE, 1), name="logmel")
 
     # Block 1 — local spectro-temporal features
-    x = layers.Conv2D(32, (5, 5), padding="same", activation="relu", name="conv1")(inputs)
+    x = layers.Conv2D(32, (5, 5), padding="same", use_bias=False, name="conv1")(inputs)
     x = layers.BatchNormalization(name="bn1")(x)
-    x = layers.MaxPool2D((2, 2), name="pool1")(x)      # was (2, 4) in v20
+    x = layers.ReLU(name="relu1")(x)
+    x = layers.MaxPool2D((2, 2), name="pool1")(x)
 
     # Block 2 — mid-level motifs
-    x = layers.Conv2D(64, (3, 3), padding="same", activation="relu", name="conv2")(x)
+    x = layers.Conv2D(64, (3, 3), padding="same", use_bias=False, name="conv2")(x)
     x = layers.BatchNormalization(name="bn2")(x)
-    x = layers.MaxPool2D((2, 2), name="pool2")(x)      # was (2, 4) in v20
+    x = layers.ReLU(name="relu2")(x)
+    x = layers.SpatialDropout2D(0.10, name="sdrop2")(x)
+    x = layers.MaxPool2D((2, 2), name="pool2")(x)
 
     # Block 3 — higher-level patterns
-    x = layers.Conv2D(128, (3, 3), padding="same", activation="relu", name="conv3")(x)
+    x = layers.Conv2D(128, (3, 3), padding="same", use_bias=False, name="conv3")(x)
     x = layers.BatchNormalization(name="bn3")(x)
-    x = layers.MaxPool2D((2, 2), name="pool3")(x)      # was (2, 4) in v20
+    x = layers.ReLU(name="relu3")(x)
+    x = layers.SpatialDropout2D(0.10, name="sdrop3")(x)
+    x = layers.MaxPool2D((2, 2), name="pool3")(x)
 
-    # Block 4 — global structure
-    x = layers.Conv2D(128, (3, 3), padding="same", activation="relu", name="conv4")(x)
+    # Block 4 — global structure (256 filters)
+    x = layers.Conv2D(256, (3, 3), padding="same", use_bias=False, name="conv4")(x)
     x = layers.BatchNormalization(name="bn4")(x)
-    x = layers.MaxPool2D((2, 2), name="pool4")(x)      # unchanged
+    x = layers.ReLU(name="relu4")(x)
+    x = layers.MaxPool2D((2, 2), name="pool4")(x)
+
+    # Block 5 — deeper abstraction (256 filters)
+    x = layers.Conv2D(256, (3, 3), padding="same", use_bias=False, name="conv5")(x)
+    x = layers.BatchNormalization(name="bn5")(x)
+    x = layers.ReLU(name="relu5")(x)
+    x = layers.MaxPool2D((2, 2), name="pool5")(x)
 
     # Classifier head
     x = layers.GlobalAveragePooling2D(name="gap")(x)
-    x = layers.Dropout(0.3, name="dropout")(x)
+    x = layers.Dropout(0.2, name="dropout")(x)
     outputs = layers.Dense(n_classes, activation="softmax", name="fc_out")(x)
 
-    return keras.Model(inputs, outputs, name="logmel_2dcnn_v20a")
+    return keras.Model(inputs, outputs, name="logmel_2dcnn_v20a1")
 
 with tf.device(RUNTIME_DEVICE):
     model = build_model(N_CLASSES)
@@ -964,16 +959,102 @@ import json as _json
 _t0 = _time_module.perf_counter()
 
 _run_ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-RUN_DIR = MODELS_BASE_DIR / f"logmel-cnn-v20a-{_run_ts}"
+RUN_DIR = MODELS_BASE_DIR / f"logmel-cnn-v20a1-{_run_ts}"
 RUN_DIR.mkdir(parents=True, exist_ok=True)
 print(f"Run directory : {RUN_DIR}")
 
+# ── Cosine annealing LR schedule with warmup ─────────────────────────────────
+WARMUP_EPOCHS = 3
+LR_MAX        = 1e-3
+LR_MIN        = 1e-6
+
+# Estimate steps_per_epoch from training dataset
+_steps_per_epoch = tf.data.experimental.cardinality(train_ds).numpy()
+if _steps_per_epoch <= 0:
+    _steps_per_epoch = len(train_index_u) // BATCH_SIZE
+
+_total_steps  = EPOCHS * _steps_per_epoch
+_warmup_steps = WARMUP_EPOCHS * _steps_per_epoch
+
+class CosineAnnealingWithWarmup(tf.keras.optimizers.schedules.LearningRateSchedule):
+    """Linear warmup followed by cosine decay to min_lr."""
+    def __init__(self, warmup_steps, total_steps, lr_max, lr_min):
+        super().__init__()
+        self.warmup_steps = float(warmup_steps)
+        self.total_steps  = float(total_steps)
+        self.lr_max       = lr_max
+        self.lr_min       = lr_min
+
+    def __call__(self, step):
+        step = tf.cast(step, tf.float32)
+        # Warmup phase
+        warmup_lr = self.lr_min + (self.lr_max - self.lr_min) * (step / tf.maximum(self.warmup_steps, 1.0))
+        # Cosine decay phase
+        progress = (step - self.warmup_steps) / tf.maximum(self.total_steps - self.warmup_steps, 1.0)
+        cosine_lr = self.lr_min + 0.5 * (self.lr_max - self.lr_min) * (1.0 + tf.cos(np.pi * progress))
+        return tf.where(step < self.warmup_steps, warmup_lr, cosine_lr)
+
+    def get_config(self):
+        return {"warmup_steps": self.warmup_steps, "total_steps": self.total_steps,
+                "lr_max": self.lr_max, "lr_min": self.lr_min}
+
+_lr_schedule = CosineAnnealingWithWarmup(_warmup_steps, _total_steps, LR_MAX, LR_MIN)
+
 with tf.device(RUNTIME_DEVICE):
     model.compile(
-        optimizer=tf.keras.optimizers.AdamW(learning_rate=1e-3, weight_decay=WEIGHT_DECAY),
+        optimizer=tf.keras.optimizers.AdamW(learning_rate=_lr_schedule, weight_decay=WEIGHT_DECAY),
         loss=tf.keras.losses.CategoricalCrossentropy(label_smoothing=LABEL_SMOOTHING),
         metrics=["accuracy"],
     )
+
+# ── Custom MacroF1Checkpoint — saves model when val macro-F1 improves ────────
+class _MacroF1Checkpoint(tf.keras.callbacks.Callback):
+    """Compute val macro-F1 at end of every ``check_freq`` epochs; save model when it improves.
+
+    EarlyStopping monitors val_loss (stable stopping signal).
+    This callback monitors val_macro_f1 (genre-balanced performance goal).
+    The two objectives can diverge in later epochs when label smoothing and
+    class weights cause val_loss to move independently of classification accuracy.
+
+    ``check_freq`` controls how often the extra validation pass runs:
+      - check_freq=1  : every epoch (default; most accurate F1 curve, highest cost)
+      - check_freq=2+ : every N epochs (halves/reduces extra validation overhead;
+                        f1_history repeats the last measured value on skipped epochs
+                        so the list stays epoch-aligned for plotting)
+    """
+    def __init__(self, val_ds: tf.data.Dataset, genre_classes: list, filepath: str,
+                 check_freq: int = 1):
+        super().__init__()
+        self.val_ds        = val_ds
+        self.genre_classes = genre_classes
+        self.filepath      = filepath
+        self.check_freq    = max(1, check_freq)
+        self.best_f1       = -1.0
+        self.f1_history    = []
+
+    def on_epoch_end(self, epoch, logs=None):
+        # On skipped epochs, repeat the last known F1 so history stays aligned.
+        if (epoch + 1) % self.check_freq != 0:
+            last = self.f1_history[-1] if self.f1_history else 0.0
+            self.f1_history.append(last)
+            return
+
+        y_true, y_pred = [], []
+        for xb, yb in self.val_ds:
+            preds = self.model(xb, training=False).numpy()
+            y_pred.append(np.argmax(preds, axis=1))
+            y_true.append(np.argmax(yb.numpy(), axis=1))
+        macro_f1 = float(f1_score(
+            np.concatenate(y_true), np.concatenate(y_pred),
+            average="macro", zero_division=0,
+        ))
+        self.f1_history.append(macro_f1)
+        if logs is not None:
+            logs["val_macro_f1"] = macro_f1
+        if macro_f1 > self.best_f1:
+            self.best_f1 = macro_f1
+            self.model.save(self.filepath)
+            print(f"\n  [MacroF1Checkpoint] epoch {epoch+1}: val_macro_f1 improved to {macro_f1:.4f} → saved")
 
 # ── Custom callbacks for plot data (LR schedule + per-epoch timing) ─────────
 class _LRLogger(tf.keras.callbacks.Callback):
@@ -982,7 +1063,12 @@ class _LRLogger(tf.keras.callbacks.Callback):
         super().__init__()
         self.lrs = []
     def on_epoch_end(self, epoch, logs=None):
-        lr = float(tf.keras.backend.get_value(self.model.optimizer.lr))
+        opt = self.model.optimizer
+        lr_attr = opt.learning_rate          # always present in TF2/Keras
+        if callable(lr_attr):                # LRSchedule or similar callable
+            lr = float(lr_attr(opt.iterations))
+        else:                                # tf.Variable or plain Python float
+            lr = float(lr_attr)
         self.lrs.append(lr)
 
 class _EpochTimer(tf.keras.callbacks.Callback):
@@ -996,26 +1082,28 @@ class _EpochTimer(tf.keras.callbacks.Callback):
     def on_epoch_end(self, epoch, logs=None):
         self.times.append(round(_time_module.perf_counter() - self._t0, 3))
 
-_lr_logger   = _LRLogger()
-_epoch_timer = _EpochTimer()
+_lr_logger    = _LRLogger()
+_epoch_timer  = _EpochTimer()
+_f1_ckpt      = _MacroF1Checkpoint(
+    val_ds=val_ds,
+    genre_classes=GENRE_CLASSES,
+    filepath=str(RUN_DIR / "best_model_macro_f1.keras"),
+    check_freq=2,
+)
 
 callbacks = [
-
-    # Temporally stop early stopping regularization - do not remove this
-    # tf.keras.callbacks.EarlyStopping(
-    #     monitor="val_loss", patience=9, restore_best_weights=True, verbose=1,
-    # ),
-    tf.keras.callbacks.ReduceLROnPlateau(
-        monitor="val_loss", factor=0.5, patience=3, min_lr=1e-6, verbose=1,
+    tf.keras.callbacks.EarlyStopping(
+        monitor="val_loss", patience=9, restore_best_weights=True, verbose=1,
     ),
+    _f1_ckpt,
     _lr_logger,
     _epoch_timer,
 ]
 
 print(f"Training on {RUNTIME_DEVICE}  |  epochs={EPOCHS}, batch_size={BATCH_SIZE}")
-print(f"Optimizer: AdamW(lr=1e-3, weight_decay={WEIGHT_DECAY})")
+print(f"Optimizer: AdamW(cosine_annealing, warmup={WARMUP_EPOCHS}ep, lr_max={LR_MAX}, weight_decay={WEIGHT_DECAY})")
 print(f"Loss: CategoricalCrossentropy(label_smoothing={LABEL_SMOOTHING})")
-print(f"Callbacks: EarlyStopping(patience=9), ReduceLROnPlateau(patience=3)\n")
+print(f"Callbacks: EarlyStopping(val_loss, patience=9), MacroF1Checkpoint(best_macro_f1), CosineAnnealing\n")
 
 with tf.device(RUNTIME_DEVICE):
     history = model.fit(
@@ -1027,15 +1115,22 @@ with tf.device(RUNTIME_DEVICE):
     )
 
 _n_ep = len(history.history["loss"])
-best = min(range(_n_ep), key=lambda i: history.history["val_loss"][i])
-print(f"\nBest epoch : {best + 1} / {_n_ep}")
-for k in ["loss", "accuracy", "val_loss", "val_accuracy"]:
-    print(f"  {k:<16}: {history.history[k][best]:.4f}")
+best_loss = min(range(_n_ep), key=lambda i: history.history["val_loss"][i])
+best_f1   = int(np.argmax(_f1_ckpt.f1_history)) if _f1_ckpt.f1_history else best_loss
+# Use best macro-F1 epoch as canonical "best" for reporting
+best = best_f1
+print(f"\nBest epoch by val_loss   : {best_loss + 1} / {_n_ep}  (val_loss={history.history['val_loss'][best_loss]:.4f})")
+print(f"Best epoch by macro_F1   : {best_f1 + 1} / {_n_ep}  (val_macro_f1={_f1_ckpt.f1_history[best_f1]:.4f})  ← primary metric")
+print(f"\nMetrics at best macro-F1 epoch ({best_f1 + 1}):")
+print(f"  {'val_macro_f1':<16}: {_f1_ckpt.f1_history[best_f1]:.4f}  ← primary (genre-balanced)")
+for k in ["val_accuracy", "val_loss", "accuracy", "loss"]:
+    note = "  ← secondary (inspect alongside Macro-F1 and per-genre F1)" if k == "val_accuracy" else ""
+    print(f"  {k:<16}: {history.history[k][best]:.4f}{note}")
 
 _section_times["7. Compile & train"] = _time_module.perf_counter() - _t0
 print(f"\nCompile & train : {_section_times['7. Compile & train']:.1f}s  ({_section_times['7. Compile & train']/_n_ep:.1f}s per epoch)")
 
-model_path = RUN_DIR / "baseline_logmel_cnn_v20a.keras"
+model_path = RUN_DIR / "baseline_logmel_cnn_v20a1.keras"
 model.save(str(model_path))
 print(f"Model saved  -> {model_path}")
 
@@ -1051,12 +1146,12 @@ _summary_lines = []
 model.summary(print_fn=lambda l: _summary_lines.append(l))
 
 _report = {
-    "run_id":       f"logmel-cnn-v20a-{_run_ts}",
+    "run_id":       f"logmel-cnn-v20a1-{_run_ts}",
     "subset":       SUBSET,
     "generated_at": _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     "model_file":   model_path.name,
     "feature_type": "logmel",
-    "version":      "v20a",
+    "version":      "v20a1",
     "config": {
         "device":        RUNTIME_DEVICE,
         "audio_backend": AUDIO_BACKEND,
@@ -1078,20 +1173,23 @@ _report = {
             "epochs_actual":        _n_ep,
             "batch_size":           BATCH_SIZE,
             "optimizer":            "AdamW",
-            "lr":                   1e-3,
+            "lr_schedule":          "cosine_annealing_with_warmup",
+            "lr_max":               LR_MAX,
+            "lr_min":               LR_MIN,
+            "warmup_epochs":        WARMUP_EPOCHS,
             "weight_decay":         WEIGHT_DECAY,
             "loss":                 "CategoricalCrossentropy",
             "label_smoothing":      LABEL_SMOOTHING,
             "class_weights":        class_weight_dict,
-            "early_stopping":       {"monitor": "val_loss", "patience": 5},
-            "reduce_lr_on_plateau": {"monitor": "val_loss", "factor": 0.5, "patience": 3, "min_lr": 1e-6},
+            "early_stopping":       {"monitor": "val_loss", "patience": 9, "restore_best_weights": True},
+            "macro_f1_checkpoint":   {"monitor": "val_macro_f1", "save_best_only": True, "filepath": "best_model_macro_f1.keras"},
             "spec_augment": {
                 "freq_mask": SPEC_AUG_FREQ_MASK,
                 "time_mask": SPEC_AUG_TIME_MASK,
                 "num_masks": SPEC_AUG_NUM_MASKS,
             },
         },
-        "architecture_changes": "milder_pooling_2x2_all_blocks",
+        "architecture_changes": "v20a1_deeper_5block_proper_bn_spatial_dropout",
     },
     "dataset": {
         "n_classes":     N_CLASSES,
@@ -1108,20 +1206,30 @@ _report = {
     "training_history": {
         "epochs": [
             {
-                "epoch":        i + 1,
-                "loss":         float(_hist["loss"][i]),
-                "accuracy":     float(_hist["accuracy"][i]),
-                "val_loss":     float(_hist["val_loss"][i]),
-                "val_accuracy": float(_hist["val_accuracy"][i]),
+                "epoch":          i + 1,
+                "loss":           float(_hist["loss"][i]),
+                "accuracy":       float(_hist["accuracy"][i]),
+                "val_loss":       float(_hist["val_loss"][i]),
+                "val_accuracy":   float(_hist["val_accuracy"][i]),
+                "val_macro_f1":   round(float(_f1_ckpt.f1_history[i]), 4) if i < len(_f1_ckpt.f1_history) else None,
             }
             for i in range(_n_ep)
         ],
-        "best_epoch": {
-            "epoch":        best + 1,
-            "loss":         float(_hist["loss"][best]),
-            "accuracy":     float(_hist["accuracy"][best]),
-            "val_loss":     float(_hist["val_loss"][best]),
-            "val_accuracy": float(_hist["val_accuracy"][best]),
+        "best_epoch_val_loss": {
+            "epoch":          best_loss + 1,
+            "loss":           float(_hist["loss"][best_loss]),
+            "accuracy":       float(_hist["accuracy"][best_loss]),
+            "val_loss":       float(_hist["val_loss"][best_loss]),
+            "val_accuracy":   float(_hist["val_accuracy"][best_loss]),
+            "val_macro_f1":   round(float(_f1_ckpt.f1_history[best_loss]), 4) if best_loss < len(_f1_ckpt.f1_history) else None,
+        },
+        "best_epoch_macro_f1": {
+            "epoch":          best_f1 + 1,
+            "loss":           float(_hist["loss"][best_f1]),
+            "accuracy":       float(_hist["accuracy"][best_f1]),
+            "val_loss":       float(_hist["val_loss"][best_f1]),
+            "val_accuracy":   float(_hist["val_accuracy"][best_f1]),
+            "val_macro_f1":   round(float(_f1_ckpt.f1_history[best_f1]), 4) if best_f1 < len(_f1_ckpt.f1_history) else None,
         },
         "timing_seconds":    round(_t_train, 2),
         "seconds_per_epoch": round(_t_train / _n_ep, 2),
@@ -1146,7 +1254,10 @@ _plot_data = {
         "accuracy":         [float(v) for v in _hist["accuracy"]],
         "val_loss":         [float(v) for v in _hist["val_loss"]],
         "val_accuracy":     [float(v) for v in _hist["val_accuracy"]],
-        "best_epoch":       best + 1,
+        "val_macro_f1":     [round(float(v), 4) for v in _f1_ckpt.f1_history],
+        "best_epoch_loss":  best_loss + 1,
+        "best_epoch_f1":    best_f1 + 1,
+        "best_epoch":       best_f1 + 1,  # canonical best = macro-F1 epoch
         # Plot 1 — LR schedule overlay
         "lr_per_epoch":     _lr_logger.lrs,
         # Plot 2 — train-val loss gap (derivable, but pre-computed for convenience)
@@ -1178,14 +1289,14 @@ _t0 = _time_module.perf_counter()
 hist = history.history
 epochs_range = range(1, len(hist["accuracy"]) + 1)
 
-fig, (ax_acc, ax_loss) = plt.subplots(1, 2, figsize=(13, 4))
+fig, (ax_acc, ax_loss, ax_f1) = plt.subplots(1, 3, figsize=(18, 4))
 
 ax_acc.plot(epochs_range, hist["accuracy"],     label="Train",      linewidth=2)
 ax_acc.plot(epochs_range, hist["val_accuracy"], label="Validation", linewidth=2, linestyle="--")
-ax_acc.set_title("Accuracy")
+ax_acc.set_title("Accuracy (secondary — interpret alongside Macro-F1)")
 ax_acc.set_xlabel("Epoch")
 ax_acc.set_ylabel("Accuracy")
-ax_acc.legend()
+ax_acc.legend(fontsize=8)
 ax_acc.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
 for spine in ["top", "right"]:
     ax_acc.spines[spine].set_visible(False)
@@ -1200,14 +1311,35 @@ ax_loss.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
 for spine in ["top", "right"]:
     ax_loss.spines[spine].set_visible(False)
 
-fig.suptitle("Training history -- Log-Mel 2D CNN v20a (10s center-crop)", fontsize=13)
+# Macro-F1 per epoch (from _MacroF1Checkpoint)
+if _f1_ckpt.f1_history:
+    ax_f1.plot(epochs_range, _f1_ckpt.f1_history, label="Val Macro-F1", linewidth=2.5, color="darkorange")
+    ax_f1.axvline(best_f1 + 1, color="darkorange", linestyle=":", linewidth=1.5,
+                  label=f"Best F1 epoch ({best_f1+1}): {_f1_ckpt.best_f1:.4f}")
+    if best_loss != best_f1:
+        ax_f1.axvline(best_loss + 1, color="steelblue", linestyle=":", linewidth=1.2,
+                      label=f"Best val_loss epoch ({best_loss+1})")
+    ax_f1.set_title("Val Macro-F1 (PRIMARY metric)", fontweight="bold")
+    ax_f1.set_xlabel("Epoch")
+    ax_f1.set_ylabel("Macro-F1")
+    ax_f1.set_ylim(0, 1)
+    ax_f1.legend(fontsize=8)
+    ax_f1.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+    for spine in ["top", "right"]:
+        ax_f1.spines[spine].set_visible(False)
+
+fig.suptitle("Training history -- Log-Mel 2D CNN v20a1 (10s center-crop)", fontsize=13)
 plt.tight_layout()
 plt.show()
 
-final_train_acc = hist["accuracy"][-1]
-final_val_acc   = hist["val_accuracy"][-1]
-print(f"Final train accuracy : {final_train_acc:.4f}  ({final_train_acc:.2%})")
-print(f"Final val   accuracy : {final_val_acc:.4f}  ({final_val_acc:.2%})")
+if _f1_ckpt.f1_history:
+    print(f"Best val macro-F1    : {_f1_ckpt.best_f1:.4f}  (epoch {best_f1 + 1})  ← primary metric")
+final_val_acc = hist["val_accuracy"][-1]
+print(f"Final val   accuracy : {final_val_acc:.4f}  ({final_val_acc:.2%})  ← secondary (interpret alongside Macro-F1 and per-genre F1)")
+if _f1_ckpt.f1_history and best_loss != best_f1:
+    print(f"\n[NOTE] best val_loss epoch ({best_loss+1}) ≠ best macro-F1 epoch ({best_f1+1}).")
+    print( "  This is expected: label smoothing + class weights decouple loss from classification quality.")
+    print( "  Use best_model_macro_f1.keras for deployment.")
 
 _section_times["8. Training history plot"] = _time_module.perf_counter() - _t0
 print(f"\nTraining history plot : {_section_times['8. Training history plot']:.2f}s")
@@ -1270,18 +1402,33 @@ def eval_dataset(model, ds: tf.data.Dataset, genre_classes, split_label: str):
     return block, y_true, y_pred, metrics, confidence_data
 
 
+# ── Load the best macro-F1 model for evaluation (not the EarlyStopping model) ─
+# After training, the in-memory `model` holds the weights restored by
+# EarlyStopping (best val_loss epoch).  Since our primary metric is Macro-F1,
+# evaluation should use the checkpoint saved by _MacroF1Checkpoint.
+_best_f1_path = RUN_DIR / "best_model_macro_f1.keras"
+if _best_f1_path.exists():
+    print(f"Loading best macro-F1 model for evaluation: {_best_f1_path}")
+    _eval_model = tf.keras.models.load_model(str(_best_f1_path))
+else:
+    print("[WARN] best_model_macro_f1.keras not found — evaluating EarlyStopping-restored model instead.")
+    _eval_model = model
+
 with tf.device(RUNTIME_DEVICE):
-    train_block, y_train_true, y_train_pred, train_metrics, train_conf = eval_dataset(model, train_ds, GENRE_CLASSES, "TRAIN SET")
-    val_block,   y_val_true,   y_val_pred,   val_metrics,   val_conf   = eval_dataset(model, val_ds,   GENRE_CLASSES, "VALIDATION SET")
-    test_block,  y_test_true,  y_test_pred,  test_metrics,  test_conf  = eval_dataset(model, test_ds,  GENRE_CLASSES, "TEST SET")
+    train_block, y_train_true, y_train_pred, train_metrics, train_conf = eval_dataset(_eval_model, train_ds, GENRE_CLASSES, "TRAIN SET")
+    val_block,   y_val_true,   y_val_pred,   val_metrics,   val_conf   = eval_dataset(_eval_model, val_ds,   GENRE_CLASSES, "VALIDATION SET")
+    test_block,  y_test_true,  y_test_pred,  test_metrics,  test_conf  = eval_dataset(_eval_model, test_ds,  GENRE_CLASSES, "TEST SET")
 
 _section_times["9. Evaluation"] = _time_module.perf_counter() - _t0
 print(f"\nEvaluation : {_section_times['9. Evaluation']:.2f}s")
 
-# ── Cost summary across splits ─────────────────────────────────────────────────
-print("\nCost summary (CategoricalCrossentropy):")
+# ── Primary metric summary (Macro-F1 first) ───────────────────────────────────
+print("\nPrimary metric — Macro-F1 (balanced across all genres):")
 for label, m in [("train", train_metrics), ("val  ", val_metrics), ("test ", test_metrics)]:
-    print(f"  {label}  cost={m['cost']:.4f}  acc={m['accuracy']:.4f}  macro-f1={m['macro_f1']:.4f}")
+    print(f"  {label}  macro-f1={m['macro_f1']:.4f}")
+print("\nSecondary metrics (accuracy is useful but incomplete — inspect with per-genre F1):")
+for label, m in [("train", train_metrics), ("val  ", val_metrics), ("test ", test_metrics)]:
+    print(f"  {label}  acc={m['accuracy']:.4f}  cost={m['cost']:.4f}")
 
 _report = _json.loads(REPORT_PATH.read_text())
 _report["evaluation"] = {
@@ -1294,6 +1441,45 @@ _report["evaluation"] = {
 }
 REPORT_PATH.write_text(_json.dumps(_report, indent=2))
 print(f"Report updated -> {REPORT_PATH}")
+
+# ── Per-genre F1 bar chart (test set) — makes Macro-F1 components visible ─────
+_genre_f1_test = [test_metrics["per_genre"].get(g, {}).get("f1-score", 0.0) for g in GENRE_CLASSES]
+_chance = 1.0 / N_CLASSES
+_bar_colors_f1 = ["#d16d1b" if f < _chance else ("#4CAF50" if f >= 0.6 else "#2196F3")
+                  for f in _genre_f1_test]
+fig_f1, ax_gf1 = plt.subplots(figsize=(max(10, N_CLASSES * 0.75), 4))
+ax_gf1.bar(GENRE_CLASSES, _genre_f1_test, color=_bar_colors_f1, edgecolor="white", linewidth=0.5)
+ax_gf1.axhline(_chance,             color="red",        linestyle="--", linewidth=1.0,
+               label=f"Chance ({_chance:.2f})")
+ax_gf1.axhline(test_metrics["macro_f1"], color="darkorange", linestyle="-",  linewidth=1.5,
+               label=f"Macro-F1 = {test_metrics['macro_f1']:.4f}")
+for i, (g, f) in enumerate(zip(GENRE_CLASSES, _genre_f1_test)):
+    ax_gf1.text(i, f + 0.01, f"{f:.2f}", ha="center", va="bottom", fontsize=7.5)
+ax_gf1.set_xticks(range(N_CLASSES))
+ax_gf1.set_xticklabels(GENRE_CLASSES, rotation=35, ha="right", fontsize=9)
+ax_gf1.set_ylabel("F1-score")
+ax_gf1.set_ylim(0, 1.05)
+ax_gf1.set_title("Per-genre F1-score — test set  (orange = Macro-F1 average; red = chance)", fontsize=11)
+ax_gf1.legend(fontsize=9)
+for spine in ["top", "right"]:
+    ax_gf1.spines[spine].set_visible(False)
+plt.tight_layout()
+plt.show()
+
+# Interpretation printout
+print("\nPer-genre F1 interpretation (test set):")
+_below_chance = [g for g, f in zip(GENRE_CLASSES, _genre_f1_test) if f < _chance]
+_strong       = [g for g, f in zip(GENRE_CLASSES, _genre_f1_test) if f >= 0.6]
+_weak         = [g for g, f in zip(GENRE_CLASSES, _genre_f1_test) if _chance <= f < 0.4]
+print(f"  Strong genres  (F1 ≥ 0.60): {_strong if _strong else 'none'}")
+print(f"  Weak genres    (F1 < 0.40): {_weak   if _weak   else 'none'}")
+print(f"  Below-chance   (F1 < {_chance:.2f}): {_below_chance if _below_chance else 'none'}")
+print(f"\n  Macro-F1 = {test_metrics['macro_f1']:.4f}  |  Accuracy = {test_metrics['accuracy']:.4f}")
+if test_metrics["macro_f1"] < test_metrics["accuracy"] - 0.05:
+    print("  [NOTE] Macro-F1 is noticeably lower than accuracy — the model performs "
+          "well on majority genres but struggles on minority ones. Review below-chance genres above.")
+else:
+    print("  [OK] Macro-F1 and accuracy are close — genre-level performance is fairly balanced.")
 
 # ── Plot 4 & 9: per-genre F1 + support for all splits ─────────────────────────
 _plot_data["per_genre_metrics"] = {
@@ -1339,7 +1525,7 @@ cm       = confusion_matrix(y_test_true,  y_test_pred)
 fig, ax = plt.subplots(figsize=(13, 11))
 disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=GENRE_CLASSES)
 disp.plot(ax=ax, xticks_rotation=45, colorbar=True, cmap="Blues", values_format="d")
-ax.set_title("Confusion matrix -- test set (log-mel v20a, 10s)", fontsize=13, pad=14)
+ax.set_title("Confusion matrix -- test set (log-mel v20a1, 10s)", fontsize=13, pad=14)
 plt.tight_layout()
 plt.show()
 
@@ -1439,7 +1625,7 @@ for _infer_path, _true_genre in zip(INFER_PATHS, _true_genres):
     crop_probs = []
     for logmel in crop_logmels:
         x_infer = ((logmel[np.newaxis, ..., np.newaxis] - mu) / std).astype(np.float32)
-        p = model.predict(x_infer, verbose=0)[0]
+        p = _eval_model.predict(x_infer, verbose=0)[0]
         crop_probs.append(p)
 
     avg_probs  = np.mean(crop_probs, axis=0)
