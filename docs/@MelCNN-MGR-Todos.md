@@ -89,3 +89,30 @@ Key changes from v1 → v10:
   - Callbacks: none → EarlyStopping(patience=5) + ReduceLROnPlateau(patience=3)
   - Epochs: 20 → 30 (max; EarlyStopping may stop earlier)
   - Run artifacts: logmel-cnn-v10-{ts}/ with baseline_logmel_cnn_v10.keras
+
+4. Reusable inference modules — DONE (2026-03-08)
+Dev log: `dev-logs/2026-03-08-inference-modules.md`
+
+Both trained models now have matching standalone inference modules and CLI example scripts
+that can be run independently of the training notebooks/scripts.
+
+4.1. Log-Mel CNN v20a inference module → DONE
+  Files:
+    MelCNN-MGR/inference_logmel_v20a.py         ← MelCNNInference class
+    MelCNN-MGR/examples/inference_logmel_v20a_example.py
+  Loads: baseline_logmel_cnn_v20a.keras + norm_stats.npz from a logmel-cnn-v20a-* run dir
+  Default mode: three_crop (3 × 10s clips, averaged)
+  Run:
+    python MelCNN-MGR/examples/inference_logmel_v20a_example.py \
+        --run-dir MelCNN-MGR/models/logmel-cnn-v20a-<ts> --subset small --random 5
+
+4.2. MFCC CNN v5 inference module → DONE
+  Files:
+    MelCNN-MGR/inference_mfcc_v5.py              ← MFCCCNNInference class
+    MelCNN-MGR/examples/inference_mfcc_v5_example.py
+  Loads: baseline_mfcc_cnn.keras + norm_stats.npz from a mfcc-cnn-* run dir
+  Default mode: single_crop (full 30s clip)
+  Prerequisite: norm_stats.npz is now saved by baseline_mfcc_cnn_v5.ipynb (Section 7)
+  Run:
+    python MelCNN-MGR/examples/inference_mfcc_v5_example.py \
+        --run-dir MelCNN-MGR/models/mfcc-cnn-<ts> --subset small --random 5

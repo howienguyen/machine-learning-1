@@ -83,6 +83,10 @@ import matplotlib.ticker as mticker
 
 import os
 
+# Turn off oneDNN verbose logging for this Python process
+os.environ["ONEDNN_VERBOSE"] = "none"
+os.environ["DNNL_VERBOSE"] = "0"   # legacy/compatibility knob often still honored
+
 warnings.filterwarnings("ignore", category=UserWarning)
 
 import tensorflow as tf
@@ -111,7 +115,7 @@ print(f"TensorFlow : {tf.__version__}")
 
 # %%
 # -- Paths ---------------------------------------------------------------------
-NOTEBOOK_DIR    = Path().resolve()
+NOTEBOOK_DIR    = Path(__file__).resolve().parent   # always the script's own dir
 MELCNN_DIR      = NOTEBOOK_DIR.parent
 WORKSPACE       = MELCNN_DIR.parent
 
@@ -123,7 +127,7 @@ MODELS_BASE_DIR = MELCNN_DIR / "models"
 RUN_DIR         = None
 
 # -- Subset --------------------------------------------------------------------
-SUBSET        = "small"   # "tiny" | "small" | "medium" | "large"
+SUBSET        = "medium"   # "tiny" | "small" | "medium" | "large"
 CLEAR_CACHE   = False
 
 # -- Audio backend -------------------------------------------------------------
@@ -133,7 +137,7 @@ AUDIO_BACKEND = "ffmpeg" if FFMPEG_AVAILABLE else "librosa"
 print(f"[Audio] backend = {AUDIO_BACKEND} (ffmpeg_available={FFMPEG_AVAILABLE})")
 
 # -- Performance knobs ---------------------------------------------------------
-NUM_WORKERS   = min(6, (os.cpu_count() or 8))
+NUM_WORKERS   = min(3, (os.cpu_count() or 6))
 
 # -- Audio sanity checks -------------------------------------------------------
 MIN_SECONDS   = 1.0
@@ -172,7 +176,7 @@ LOGMEL_SHAPE  = (N_MELS, N_FRAMES)
 print(f"[Clip] CLIP_DURATION={CLIP_DURATION}s  →  N_FRAMES={N_FRAMES}  →  LOGMEL_SHAPE={LOGMEL_SHAPE}")
 
 # -- Reproducibility seed ------------------------------------------------------
-SEED = 42
+SEED = 36
 
 import random
 random.seed(SEED)
@@ -971,19 +975,47 @@ with tf.device(RUNTIME_DEVICE):
         metrics=["accuracy"],
     )
 
+# ── Custom callbacks for plot data (LR schedule + per-epoch timing) ─────────
+class _LRLogger(tf.keras.callbacks.Callback):
+    """Record the optimizer learning rate at the end of every epoch."""
+    def __init__(self):
+        super().__init__()
+        self.lrs = []
+    def on_epoch_end(self, epoch, logs=None):
+        lr = float(tf.keras.backend.get_value(self.model.optimizer.lr))
+        self.lrs.append(lr)
+
+class _EpochTimer(tf.keras.callbacks.Callback):
+    """Record wall-clock seconds for every epoch."""
+    def __init__(self):
+        super().__init__()
+        self.times = []
+        self._t0 = None
+    def on_epoch_begin(self, epoch, logs=None):
+        self._t0 = _time_module.perf_counter()
+    def on_epoch_end(self, epoch, logs=None):
+        self.times.append(round(_time_module.perf_counter() - self._t0, 3))
+
+_lr_logger   = _LRLogger()
+_epoch_timer = _EpochTimer()
+
 callbacks = [
-    tf.keras.callbacks.EarlyStopping(
-        monitor="val_loss", patience=5, restore_best_weights=True, verbose=1,
-    ),
+
+    # Temporally stop early stopping regularization - do not remove this
+    # tf.keras.callbacks.EarlyStopping(
+    #     monitor="val_loss", patience=9, restore_best_weights=True, verbose=1,
+    # ),
     tf.keras.callbacks.ReduceLROnPlateau(
         monitor="val_loss", factor=0.5, patience=3, min_lr=1e-6, verbose=1,
     ),
+    _lr_logger,
+    _epoch_timer,
 ]
 
 print(f"Training on {RUNTIME_DEVICE}  |  epochs={EPOCHS}, batch_size={BATCH_SIZE}")
 print(f"Optimizer: AdamW(lr=1e-3, weight_decay={WEIGHT_DECAY})")
 print(f"Loss: CategoricalCrossentropy(label_smoothing={LABEL_SMOOTHING})")
-print(f"Callbacks: EarlyStopping(patience=5), ReduceLROnPlateau(patience=3)\n")
+print(f"Callbacks: EarlyStopping(patience=9), ReduceLROnPlateau(patience=3)\n")
 
 with tf.device(RUNTIME_DEVICE):
     history = model.fit(
@@ -1006,6 +1038,11 @@ print(f"\nCompile & train : {_section_times['7. Compile & train']:.1f}s  ({_sect
 model_path = RUN_DIR / "baseline_logmel_cnn_v20a.keras"
 model.save(str(model_path))
 print(f"Model saved  -> {model_path}")
+
+# ── Save normalization stats for standalone inference ──────────────────────────
+norm_stats_path = RUN_DIR / "norm_stats.npz"
+np.savez(str(norm_stats_path), mu=mu, std=std, genre_classes=np.array(GENRE_CLASSES))
+print(f"Norm stats   -> {norm_stats_path}")
 
 _hist    = history.history
 _t_train = _section_times["7. Compile & train"]
@@ -1096,6 +1133,42 @@ REPORT_PATH = RUN_DIR / f"run_report_{SUBSET}.json"
 REPORT_PATH.write_text(_json.dumps(_report, indent=2))
 print(f"Run report   -> {REPORT_PATH}")
 
+# ── Plot data file — collects all data needed to recreate every plot ───────────
+# Populated incrementally: training history here, confusion matrices in Section 9,
+# inference probabilities in Section 10.  Written to disk after each section.
+PLOT_DATA_PATH = RUN_DIR / f"plot_data_{SUBSET}.json"
+_plot_data = {
+    "genre_classes": GENRE_CLASSES,
+    "n_classes":     N_CLASSES,
+    "training_history": {
+        "epochs":           list(range(1, _n_ep + 1)),
+        "loss":             [float(v) for v in _hist["loss"]],
+        "accuracy":         [float(v) for v in _hist["accuracy"]],
+        "val_loss":         [float(v) for v in _hist["val_loss"]],
+        "val_accuracy":     [float(v) for v in _hist["val_accuracy"]],
+        "best_epoch":       best + 1,
+        # Plot 1 — LR schedule overlay
+        "lr_per_epoch":     _lr_logger.lrs,
+        # Plot 2 — train-val loss gap (derivable, but pre-computed for convenience)
+        "loss_gap":         [round(float(vl - tl), 6)
+                             for tl, vl in zip(_hist["loss"], _hist["val_loss"])],
+        # Plot 3 — per-epoch wall-clock timing
+        "seconds_per_epoch": _epoch_timer.times,
+    },
+    # Plot 8 — class distribution per split (sample count per genre)
+    "class_distribution": {
+        split: {g: int(df["genre_top"].value_counts().get(g, 0))
+                for g in GENRE_CLASSES}
+        for split, df in [("train", train_df), ("validation", val_df), ("test", test_df)]
+    },
+    "confusion_matrices":   None,  # filled in by Section 9b
+    "per_genre_metrics":    None,  # filled in by Section 9
+    "confidence_histogram": None,  # filled in by Section 9
+    "inference":            None,  # filled in by Section 10
+}
+PLOT_DATA_PATH.write_text(_json.dumps(_plot_data, indent=2))
+print(f"Plot data    -> {PLOT_DATA_PATH}")
+
 # %% [markdown]
 # ## 8. Training History
 
@@ -1150,20 +1223,20 @@ _t0 = _time_module.perf_counter()
 
 def eval_dataset(model, ds: tf.data.Dataset, genre_classes, split_label: str):
     # ── Cost (aggregate loss over the full split) ──────────────────────────────
-    # model.evaluate() runs the same loss function used during training
-    # (CategoricalCrossentropy + label_smoothing) over every batch in `ds` and
-    # returns the mean across all batches — this is the "cost" for the split.
     eval_results = model.evaluate(ds, verbose=0, return_dict=True)
     cost = float(eval_results.get("loss", float("nan")))
 
-    # ── Predictions for accuracy / F1 / confusion matrix ─────────────────────
-    y_true, y_pred = [], []
+    # ── Predictions + per-sample confidence for histogram (Plot 7) ───────────
+    y_true, y_pred, max_probs = [], [], []
     for xb, yb in ds:
         pred = model(xb, training=False).numpy()
         y_pred.append(np.argmax(pred, axis=1))
         y_true.append(np.argmax(yb.numpy(), axis=1))
-    y_true = np.concatenate(y_true) if y_true else np.array([], dtype=np.int64)
-    y_pred = np.concatenate(y_pred) if y_pred else np.array([], dtype=np.int64)
+        max_probs.append(np.max(pred, axis=1))
+    y_true    = np.concatenate(y_true)    if y_true    else np.array([], dtype=np.int64)
+    y_pred    = np.concatenate(y_pred)    if y_pred    else np.array([], dtype=np.int64)
+    max_probs = np.concatenate(max_probs) if max_probs else np.array([], dtype=np.float32)
+    correct_mask = (y_true == y_pred)
 
     acc      = accuracy_score(y_true, y_pred)
     macro_f1 = f1_score(y_true, y_pred, average="macro", zero_division=0)
@@ -1189,13 +1262,18 @@ def eval_dataset(model, ds: tf.data.Dataset, genre_classes, split_label: str):
         "macro_f1":  round(float(macro_f1), 4),
         "per_genre": per_genre,
     }
-    return block, y_true, y_pred, metrics
+    # Plot 7 — confidence histogram data
+    confidence_data = {
+        "correct":   [round(float(p), 6) for p in max_probs[correct_mask]],
+        "incorrect": [round(float(p), 6) for p in max_probs[~correct_mask]],
+    }
+    return block, y_true, y_pred, metrics, confidence_data
 
 
 with tf.device(RUNTIME_DEVICE):
-    train_block, y_train_true, y_train_pred, train_metrics = eval_dataset(model, train_ds, GENRE_CLASSES, "TRAIN SET")
-    val_block,   y_val_true,   y_val_pred,   val_metrics   = eval_dataset(model, val_ds,   GENRE_CLASSES, "VALIDATION SET")
-    test_block,  y_test_true,  y_test_pred,  test_metrics  = eval_dataset(model, test_ds,  GENRE_CLASSES, "TEST SET")
+    train_block, y_train_true, y_train_pred, train_metrics, train_conf = eval_dataset(model, train_ds, GENRE_CLASSES, "TRAIN SET")
+    val_block,   y_val_true,   y_val_pred,   val_metrics,   val_conf   = eval_dataset(model, val_ds,   GENRE_CLASSES, "VALIDATION SET")
+    test_block,  y_test_true,  y_test_pred,  test_metrics,  test_conf  = eval_dataset(model, test_ds,  GENRE_CLASSES, "TEST SET")
 
 _section_times["9. Evaluation"] = _time_module.perf_counter() - _t0
 print(f"\nEvaluation : {_section_times['9. Evaluation']:.2f}s")
@@ -1217,10 +1295,46 @@ _report["evaluation"] = {
 REPORT_PATH.write_text(_json.dumps(_report, indent=2))
 print(f"Report updated -> {REPORT_PATH}")
 
+# ── Plot 4 & 9: per-genre F1 + support for all splits ─────────────────────────
+_plot_data["per_genre_metrics"] = {
+    "train":      train_metrics["per_genre"],
+    "validation": val_metrics["per_genre"],
+    "test":       test_metrics["per_genre"],
+}
+# ── Plot 7: confidence histogram data ──────────────────────────────────────────
+_plot_data["confidence_histogram"] = {
+    "train":      train_conf,
+    "validation": val_conf,
+    "test":       test_conf,
+}
+# ── Plot 8: per-class accuracy per split ───────────────────────────────────────
+def _per_class_accuracy(y_true, y_pred, genre_classes):
+    """Per-class accuracy as {genre: accuracy}."""
+    result = {}
+    for i, g in enumerate(genre_classes):
+        mask = y_true == i
+        if mask.sum() > 0:
+            result[g] = round(float((y_pred[mask] == i).mean()), 4)
+        else:
+            result[g] = None
+    return result
+
+if "class_distribution" not in _plot_data:
+    _plot_data["class_distribution"] = {}
+_plot_data["class_distribution"]["per_class_accuracy"] = {
+    "train":      _per_class_accuracy(y_train_true, y_train_pred, GENRE_CLASSES),
+    "validation": _per_class_accuracy(y_val_true,   y_val_pred,   GENRE_CLASSES),
+    "test":       _per_class_accuracy(y_test_true,  y_test_pred,  GENRE_CLASSES),
+}
+PLOT_DATA_PATH.write_text(_json.dumps(_plot_data, indent=2))
+print(f"Plot data updated (per-genre metrics, confidence, per-class accuracy) -> {PLOT_DATA_PATH}")
+
 # %%
 _t0 = _time_module.perf_counter()
 
-cm = confusion_matrix(y_test_true, y_test_pred)
+cm_train = confusion_matrix(y_train_true, y_train_pred)
+cm_val   = confusion_matrix(y_val_true,   y_val_pred)
+cm       = confusion_matrix(y_test_true,  y_test_pred)
 
 fig, ax = plt.subplots(figsize=(13, 11))
 disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=GENRE_CLASSES)
@@ -1232,22 +1346,35 @@ plt.show()
 _section_times["9b. Confusion matrix"] = _time_module.perf_counter() - _t0
 print(f"Confusion matrix : {_section_times['9b. Confusion matrix']:.2f}s")
 
+# ── Save confusion matrix data for all 3 splits ───────────────────────────────
+_plot_data["confusion_matrices"] = {
+    "train":      {"matrix": cm_train.tolist(), "labels": GENRE_CLASSES},
+    "validation": {"matrix": cm_val.tolist(),   "labels": GENRE_CLASSES},
+    "test":       {"matrix": cm.tolist(),        "labels": GENRE_CLASSES},
+}
+PLOT_DATA_PATH.write_text(_json.dumps(_plot_data, indent=2))
+print(f"Plot data updated (confusion matrices) -> {PLOT_DATA_PATH}")
+
 # %% [markdown]
 # ## 10. Predict on a New Audio Sample
 
 # %%
 _t0 = _time_module.perf_counter()
 
-INFER_PATH = "../../FMA/fma_medium/000/000002.mp3"
+# INFER_PATHS: list of file paths (str or Path) to run inference on.
+# Set to None to auto-select 3 random samples from the test split.
+INFER_PATHS = None  # None → auto-select 3 random test samples
 
-if INFER_PATH is None:
-    rng_idx    = np.random.randint(len(test_df))
-    INFER_PATH = Path(test_df.iloc[rng_idx]["filepath"])
-    true_genre = test_df.iloc[rng_idx]["genre_top"]
-    print(f"Using test sample: {INFER_PATH.name}  (true genre: {true_genre})")
+if INFER_PATHS is None:
+    _rng_size    = min(3, len(test_df))
+    _rng_indices = np.random.choice(len(test_df), size=_rng_size, replace=False)
+    INFER_PATHS  = [Path(test_df.iloc[i]["filepath"]) for i in _rng_indices]
+    _true_genres = [test_df.iloc[i]["genre_top"]      for i in _rng_indices]
+    for _p, _g in zip(INFER_PATHS, _true_genres):
+        print(f"Using test sample: {_p.name}  (true genre: {_g})")
 else:
-    INFER_PATH = Path(INFER_PATH)
-    true_genre = "?"
+    INFER_PATHS  = [Path(p) for p in INFER_PATHS]
+    _true_genres = ["?" for _ in INFER_PATHS]
 
 # -- 3-crop extraction ---------------------------------------------------------
 def extract_three_crops(y: np.ndarray, sr: int, target_sec: float) -> list[np.ndarray]:
@@ -1293,20 +1420,22 @@ def extract_three_crops(y: np.ndarray, sr: int, target_sec: float) -> list[np.nd
             y[n - target_len:],                                 # late
         ]
 
-# -- Multi-crop inference ------------------------------------------------------
-try:
-    y_raw = _load_audio_simple(INFER_PATH, sr=SAMPLE_RATE, mono=True, duration=None)
-    ok, reason = _sanity_check_audio(y_raw, SAMPLE_RATE)
-    if not ok:
-        raise ValueError(f"sanity_check_failed:{reason}")
+# -- Multi-crop inference over each file ---------------------------------------
+_infer_results = []
 
-    crops = extract_three_crops(y_raw, SAMPLE_RATE, CLIP_DURATION)
-    crop_logmels = [_logmel_fixed_shape(c) for c in crops]
-except Exception as exc:
-    print(f"Could not load/extract log-mel: {exc}")
-    crop_logmels = None
+for _infer_path, _true_genre in zip(INFER_PATHS, _true_genres):
+    print(f"\n── {_infer_path.name} ──")
+    try:
+        y_raw = _load_audio_simple(_infer_path, sr=SAMPLE_RATE, mono=True, duration=None)
+        ok, reason = _sanity_check_audio(y_raw, SAMPLE_RATE)
+        if not ok:
+            raise ValueError(f"sanity_check_failed:{reason}")
+        crops = extract_three_crops(y_raw, SAMPLE_RATE, CLIP_DURATION)
+        crop_logmels = [_logmel_fixed_shape(c) for c in crops]
+    except Exception as exc:
+        print(f"  Could not load/extract log-mel: {exc}")
+        continue
 
-if crop_logmels is not None:
     crop_probs = []
     for logmel in crop_logmels:
         x_infer = ((logmel[np.newaxis, ..., np.newaxis] - mu) / std).astype(np.float32)
@@ -1318,31 +1447,55 @@ if crop_logmels is not None:
     pred_genre = GENRE_CLASSES[pred_idx]
     confidence = float(avg_probs[pred_idx])
 
-    print(f"\nPredicted genre : {pred_genre}  (confidence: {confidence:.2%})")
-    print(f"True genre      : {true_genre}")
-    print(f"Inference mode  : 3-crop average")
-
-    # Show per-crop predictions for transparency
+    print(f"  Predicted genre : {pred_genre}  (confidence: {confidence:.2%})")
+    print(f"  True genre      : {_true_genre}")
+    print(f"  Inference mode  : 3-crop average")
     for i, p in enumerate(crop_probs):
         ci = int(np.argmax(p))
-        print(f"  Crop {i+1}: {GENRE_CLASSES[ci]} ({float(p[ci]):.2%})")
+        print(f"    Crop {i+1}: {GENRE_CLASSES[ci]} ({float(p[ci]):.2%})")
 
-    # Plot averaged probabilities
-    fig, ax = plt.subplots(figsize=(10, 3))
-    colors = ["steelblue" if g != pred_genre else "tomato" for g in GENRE_CLASSES]
-    ax.barh(GENRE_CLASSES, avg_probs, color=colors)
-    ax.set_xlabel("Probability (3-crop avg)")
-    ax.set_title(f"Genre probabilities (v20a, 10s, 3-crop) -- {INFER_PATH.name}")
-    ax.axvline(1 / N_CLASSES, color="grey", linestyle="--", linewidth=0.8,
-               label=f"Chance ({1/N_CLASSES:.2%})")
-    ax.legend(fontsize=9)
-    for spine in ["top", "right"]:
-        ax.spines[spine].set_visible(False)
+    _infer_results.append({
+        "file":             str(_infer_path),
+        "true_genre":       _true_genre,
+        "pred_genre":       pred_genre,
+        "confidence":       round(confidence, 4),
+        "avg_probs":        [round(float(p), 6) for p in avg_probs],
+        "crop_probs":       [[round(float(p), 6) for p in cp] for cp in crop_probs],
+        "genre_classes":    GENRE_CLASSES,
+        # Plot 11 — log-mel spectrogram of the middle crop
+        "logmel_spectrogram": crop_logmels[1].tolist(),
+        "logmel_shape":       list(crop_logmels[1].shape),
+    })
+
+# -- Combined probability plot (one subplot per file) -------------------------
+if _infer_results:
+    n_res  = len(_infer_results)
+    fig, axes = plt.subplots(n_res, 1, figsize=(10, 3 * n_res), squeeze=False)
+    for ax, res in zip(axes[:, 0], _infer_results):
+        avg_p  = res["avg_probs"]
+        colors = ["steelblue" if g != res["pred_genre"] else "tomato" for g in GENRE_CLASSES]
+        ax.barh(GENRE_CLASSES, avg_p, color=colors)
+        ax.set_xlabel("Probability (3-crop avg)")
+        ax.set_title(
+            f"{Path(res['file']).name}  →  pred: {res['pred_genre']} "
+            f"({res['confidence']:.2%})  |  true: {res['true_genre']}"
+        )
+        ax.axvline(1 / N_CLASSES, color="grey", linestyle="--", linewidth=0.8,
+                   label=f"Chance ({1/N_CLASSES:.2%})")
+        ax.legend(fontsize=9)
+        for spine in ["top", "right"]:
+            ax.spines[spine].set_visible(False)
     plt.tight_layout()
     plt.show()
 
 _section_times["10. Inference"] = _time_module.perf_counter() - _t0
 print(f"\nInference : {_section_times['10. Inference']:.2f}s")
+
+# ── Save inference data (Plots 10 + 11) ───────────────────────────────────────
+if _infer_results:
+    _plot_data["inference_samples"] = _infer_results
+    PLOT_DATA_PATH.write_text(_json.dumps(_plot_data, indent=2))
+    print(f"Plot data updated (inference + spectrogram) -> {PLOT_DATA_PATH}")
 
 # %% [markdown]
 # ---

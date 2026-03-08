@@ -443,7 +443,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--subset",
         default=DEFAULT_SUBSET,
-        choices=["small", "medium", "large"],
+        choices=["tiny", "small", "medium", "large"],
         help="FMA subset to include as OK candidates.",
     )
     p.add_argument(
