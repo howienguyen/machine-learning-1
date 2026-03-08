@@ -1054,7 +1054,9 @@ class _MacroF1Checkpoint(tf.keras.callbacks.Callback):
         if macro_f1 > self.best_f1:
             self.best_f1 = macro_f1
             self.model.save(self.filepath)
-            print(f"\n  [MacroF1Checkpoint] epoch {epoch+1}: val_macro_f1 improved to {macro_f1:.4f} → saved")
+            print(f"\n  [MacroF1Checkpoint] epoch {epoch+1}: val_macro_f1 = {macro_f1:.4f} ★ improved → saved")
+        else:
+            print(f"\n  [MacroF1Checkpoint] epoch {epoch+1}: val_macro_f1 = {macro_f1:.4f}  (best = {self.best_f1:.4f})")
 
 # ── Custom callbacks for plot data (LR schedule + per-epoch timing) ─────────
 class _LRLogger(tf.keras.callbacks.Callback):
