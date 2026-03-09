@@ -111,7 +111,7 @@ RUN_DIR         = None
 
 # -- Subset --------------------------------------------------------------------
 SUBSET        = "medium"   # "tiny" | "small" | "medium" | "large"
-CLEAR_CACHE   = False
+CLEAR_CACHE   = True       # set to True to force re-extraction of log-mel features (useful when changing CLIP_DURATION or N_MELS)
 
 # -- Audio backend -------------------------------------------------------------
 import shutil as _shutil
@@ -120,7 +120,7 @@ AUDIO_BACKEND = "ffmpeg" if FFMPEG_AVAILABLE else "librosa"
 print(f"[Audio] backend = {AUDIO_BACKEND} (ffmpeg_available={FFMPEG_AVAILABLE})")
 
 # -- Performance knobs ---------------------------------------------------------
-NUM_WORKERS   = min(3, (os.cpu_count() or 6))
+NUM_WORKERS   = min(4, (os.cpu_count() or 6))
 
 # -- Audio sanity checks -------------------------------------------------------
 MIN_SECONDS   = 1.0
@@ -133,7 +133,7 @@ CLIP_DURATION = 10.0   # seconds — center-crop / center-pad target
 
 # -- Cache layout (per-track, separate from v20 cache) -------------------------
 LOGMEL_CACHE_SHARED = True
-LOGMEL_CACHE_DIR = CACHE_DIR / "logmel_v20a_10s" / ("shared" if LOGMEL_CACHE_SHARED else SUBSET)
+LOGMEL_CACHE_DIR = CACHE_DIR / "logmel_v20_10s" / ("shared" if LOGMEL_CACHE_SHARED else SUBSET)
 
 # -- Training hyperparameters --------------------------------------------------
 EPOCHS        = 60
@@ -372,15 +372,15 @@ print(f"Genre distribution plot : {_section_times['3b. Genre plot']:.2f}s")
 # ## 4. Log-Mel Feature Extraction
 #
 # Each original audio clip is first **normalized to exactly 10 seconds** using
-# deterministic center-crop (or center-pad for clips shorter than 10 s).
-# The 10-second waveform is then transformed into a 128-band log-mel spectrogram
-# with `n_fft=512`, `hop_length=256`, yielding a `(128, 861)` matrix.
+# random crop for train tracks (or center-crop for val/test, center-pad for clips
+# shorter than 10 s). The 10-second waveform is then transformed into a 128-band
+# log-mel spectrogram with `n_fft=512`, `hop_length=256`, yielding a `(128, 861)` matrix.
 #
 # ### Waveform normalization pipeline (per track)
 #
 # 1. **Load** full audio clip (no duration cap)
 # 2. **Sanity check** (non-empty, finite, minimum length)
-# 3. **`normalize_to_fixed_duration()`** — center-crop if > 10 s, center-pad if < 10 s
+# 3. **`normalize_to_fixed_duration()`** — random crop (train) / center-crop (val/test) if > 10 s, center-pad if < 10 s
 # 4. **Extract** log-mel spectrogram → fixed `(128, 861)` shape
 # 5. **Cache** as `.npy` in `logmel_10s/` directory
 #
@@ -437,13 +437,18 @@ def _load_audio_simple(filepath: Path, sr: int, mono: bool = True, duration: flo
     return y.astype(np.float32, copy=False)
 
 
-def normalize_to_fixed_duration(y: np.ndarray, sr: int, target_sec: float) -> np.ndarray:
-    """Normalize waveform to exactly target_sec seconds via center-crop or center-pad.
+def normalize_to_fixed_duration(
+    y: np.ndarray, sr: int, target_sec: float, random_crop: bool = False
+) -> np.ndarray:
+    """Normalize waveform to exactly target_sec seconds via crop or center-pad.
 
-    Strategy 1 from the development guideline:
-    - If clip > target_sec: center-crop around midpoint
+    - If clip > target_sec: random crop (random_crop=True) or center-crop (default)
     - If clip < target_sec: center-pad with silence (zeros)
     - If clip == target_sec: return unchanged
+
+    Use random_crop=True for training data to expose the model to varied
+    temporal positions; use the default center-crop for val/test for
+    repeatable evaluation.
     """
     target_len = int(round(target_sec * sr))
     n = len(y)
@@ -452,18 +457,18 @@ def normalize_to_fixed_duration(y: np.ndarray, sr: int, target_sec: float) -> np
         return y
 
     if n > target_len:
-        mid = n // 2
-        half = target_len // 2
-        start = mid - half
-        end = start + target_len
-        # Defensive clamping
-        if start < 0:
-            start = 0
-            end = target_len
-        if end > n:
-            end = n
-            start = n - target_len
-        return y[start:end]
+        if random_crop:
+            start = int(np.random.randint(0, n - target_len + 1))
+        else:
+            mid = n // 2
+            half = target_len // 2
+            start = mid - half
+            # Defensive clamping
+            if start < 0:
+                start = 0
+            if start + target_len > n:
+                start = n - target_len
+        return y[start : start + target_len]
 
     # n < target_len → center-pad with silence
     pad_total = target_len - n
@@ -562,8 +567,8 @@ def _process_one_track(task: tuple) -> dict:
             "corrupt_deleted": _corrupt_deleted,
         }
 
-    # Normalize to exactly CLIP_DURATION seconds (center-crop / center-pad)
-    y = normalize_to_fixed_duration(y, SAMPLE_RATE, CLIP_DURATION)
+    # Normalize to exactly CLIP_DURATION seconds (random crop for train, center-crop otherwise)
+    y = normalize_to_fixed_duration(y, SAMPLE_RATE, CLIP_DURATION, random_crop=(split_name == "train"))
 
     try:
         logmel = _logmel_fixed_shape(y)
@@ -976,6 +981,7 @@ if _steps_per_epoch <= 0:
 _total_steps  = EPOCHS * _steps_per_epoch
 _warmup_steps = WARMUP_EPOCHS * _steps_per_epoch
 
+@tf.keras.saving.register_keras_serializable(package="MelCNN")
 class CosineAnnealingWithWarmup(tf.keras.optimizers.schedules.LearningRateSchedule):
     """Linear warmup followed by cosine decay to min_lr."""
     def __init__(self, warmup_steps, total_steps, lr_max, lr_min):
@@ -1094,9 +1100,9 @@ _f1_ckpt      = _MacroF1Checkpoint(
 )
 
 callbacks = [
-    tf.keras.callbacks.EarlyStopping(
-        monitor="val_loss", patience=9, restore_best_weights=True, verbose=1,
-    ),
+    # tf.keras.callbacks.EarlyStopping(
+    #     monitor="val_loss", patience=9, restore_best_weights=True, verbose=1,
+    # ),
     _f1_ckpt,
     _lr_logger,
     _epoch_timer,
@@ -1105,7 +1111,7 @@ callbacks = [
 print(f"Training on {RUNTIME_DEVICE}  |  epochs={EPOCHS}, batch_size={BATCH_SIZE}")
 print(f"Optimizer: AdamW(cosine_annealing, warmup={WARMUP_EPOCHS}ep, lr_max={LR_MAX}, weight_decay={WEIGHT_DECAY})")
 print(f"Loss: CategoricalCrossentropy(label_smoothing={LABEL_SMOOTHING})")
-print(f"Callbacks: EarlyStopping(val_loss, patience=9), MacroF1Checkpoint(best_macro_f1), CosineAnnealing\n")
+print(f"Callbacks: MacroF1Checkpoint(best_macro_f1), CosineAnnealing\n")
 
 with tf.device(RUNTIME_DEVICE):
     history = model.fit(
@@ -1159,7 +1165,7 @@ _report = {
         "audio_backend": AUDIO_BACKEND,
         "num_workers":   NUM_WORKERS,
         "clip_duration_sec": CLIP_DURATION,
-        "waveform_normalization": "center_crop_or_center_pad",
+        "waveform_normalization": "random_crop_train__center_crop_val_test__center_pad_short",
         "logmel_extraction": {
             "sample_rate":  SAMPLE_RATE,
             "n_mels":       N_MELS,
@@ -1330,7 +1336,7 @@ if _f1_ckpt.f1_history:
     for spine in ["top", "right"]:
         ax_f1.spines[spine].set_visible(False)
 
-fig.suptitle("Training history -- Log-Mel 2D CNN v20a1 (10s center-crop)", fontsize=13)
+fig.suptitle("Training history -- Log-Mel 2D CNN v20a1 (10s random crop)", fontsize=13)
 plt.tight_layout()
 plt.show()
 
