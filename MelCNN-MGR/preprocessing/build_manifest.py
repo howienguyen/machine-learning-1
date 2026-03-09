@@ -14,7 +14,7 @@ Implements the four phases from docs/MelCNN-MGR-Preprocessing.md::
 
 Usage
 -----
-    # Default (medium subset, fma_medium audio, no decode probe)
+    # Default (small subset, fma_small audio, no decode probe)
     python MelCNN-MGR/preprocessing/build_manifest.py
 
     # Full options
@@ -35,12 +35,17 @@ Outputs (written to --out-dir, all names include the subset tag)
     metadata_manifest_config_{subset}.json config snapshot (reproducibility)
     metadata_manifest_report_{subset}.txt  quality-gate summary
 
+All parquet outputs include two identity columns:
+    sample_id    globally unique sample key, e.g. "fma:12345"
+    source       dataset/source name, e.g. "fma"
+
 Reason codes
 ------------
     OK                  usable sample
     NOT_IN_SUBSET       track is not in the requested subset
     NO_AUDIO_FILE       metadata row exists but MP3 is missing
     NO_LABEL            genre_top is null/empty
+    EXCLUDED_LABEL      genre_top is intentionally excluded from training
     NO_SPLIT            split value is missing or unrecognised
     TOO_SHORT           duration < min_duration_s
     DECODE_FAIL         file exists but cannot be decoded (--decode-probe only)
@@ -77,7 +82,7 @@ _WORKSPACE     = _MELCNN_DIR.parent                       # …/machine-learning
 DEFAULT_METADATA_ROOT = _WORKSPACE / "FMA" / "fma_metadata"
 DEFAULT_OUT_DIR       = _MELCNN_DIR / "data" / "processed"
 DEFAULT_SUBSET        = "small"   # one of "small", "medium", "large"
-DEFAULT_AUDIO_ROOT    = _WORKSPACE / "FMA" / f"fma_{DEFAULT_SUBSET}"
+DEFAULT_SOURCE_NAME   = "fma"
 
 DEFAULT_MIN_DURATION  = 30       # seconds — standard FMA clip window
 
@@ -101,10 +106,25 @@ _LIST_COLS = [
 # Valid split labels used by FMA
 _VALID_SPLITS = frozenset({"training", "validation", "test"})
 
+# Labels intentionally excluded from train/val/test exports
+_EXCLUDED_GENRE_TOP_LABELS = frozenset({"International"})
+# _EXCLUDED_GENRE_TOP_LABELS = frozenset()
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Utilities
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _normalize_text(value: object) -> str:
+    """Return a stripped, case-folded string for robust text comparisons."""
+    if pd.isna(value):
+        return ""
+    return str(value).strip().casefold()
+
+
+def _is_excluded_genre_top(value: object) -> bool:
+    """Return True if *value* is in the configured excluded-label set."""
+    return _normalize_text(value) in _EXCLUDED_GENRE_TOP_LABELS
 
 def get_audio_path(audio_dir: Path, track_id: int) -> Path:
     """Return the expected MP3 path for a given FMA track_id.
@@ -122,6 +142,16 @@ def get_audio_path(audio_dir: Path, track_id: int) -> Path:
     """
     tid_str = f"{track_id:06d}"
     return audio_dir / tid_str[:3] / f"{tid_str}.mp3"
+
+
+def make_sample_id(source_name: str, track_id: object) -> str:
+    """Return a stable globally unique sample identifier."""
+    return f"{source_name}:{track_id}"
+
+
+def default_audio_root_for_subset(subset: str) -> Path:
+    """Return the default FMA audio directory for a given subset label."""
+    return _WORKSPACE / "FMA" / f"fma_{subset}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -157,10 +187,14 @@ def load_tracks(metadata_root: Path) -> pd.DataFrame:
     return tracks
 
 
-def phase_a_collect(tracks: pd.DataFrame, subset: str) -> pd.DataFrame:
+def phase_a_collect(tracks: pd.DataFrame, subset: str, source_name: str) -> pd.DataFrame:
     """Extract the columns needed for the manifest and flag subset membership.
 
     Returns a flat DataFrame keyed by ``track_id``.
+
+    Adds two flat identity columns for downstream multi-source manifests:
+        sample_id    globally unique sample identifier
+        source       dataset/source name
     """
     logging.info("Phase A: collecting candidates for subset='%s'", subset)
 
@@ -170,6 +204,8 @@ def phase_a_collect(tracks: pd.DataFrame, subset: str) -> pd.DataFrame:
     # Keep only the columns we need (all are present in every FMA tracks.csv)
     df = tracks[needed].copy()
     df.columns = ["split", "subset", "genre_top", "duration_s", "bit_rate", "artist_id"]
+    df.insert(0, "source", source_name)
+    df.insert(0, "sample_id", [make_sample_id(source_name, int(track_id)) for track_id in df.index])
 
     # Cast types
     df["duration_s"] = pd.to_numeric(df["duration_s"], errors="coerce")
@@ -183,6 +219,10 @@ def phase_a_collect(tracks: pd.DataFrame, subset: str) -> pd.DataFrame:
     dupes = df.index.duplicated().sum()
     if dupes:
         logging.warning("  %d duplicate track_id(s) detected", dupes)
+
+    sample_id_dupes = df["sample_id"].duplicated().sum()
+    if sample_id_dupes:
+        logging.warning("  %d duplicate sample_id(s) detected", sample_id_dupes)
 
     n_in_subset = df["_in_target_subset"].sum()
     logging.info("  Total rows: %d | In subset '%s': %d", len(df), subset, n_in_subset)
@@ -235,7 +275,7 @@ def _assign_reason(row: pd.Series, min_duration_s: int) -> str:
     """Return the single reason_code that best explains a row's status.
 
     Priority (first rule that fires wins):
-        NOT_IN_SUBSET > NO_AUDIO_FILE > NO_LABEL > NO_SPLIT > TOO_SHORT > OK
+        NOT_IN_SUBSET > NO_AUDIO_FILE > NO_LABEL > EXCLUDED_LABEL > NO_SPLIT > TOO_SHORT > OK
     """
     if not row["_in_target_subset"]:
         return "NOT_IN_SUBSET"
@@ -243,6 +283,8 @@ def _assign_reason(row: pd.Series, min_duration_s: int) -> str:
         return "NO_AUDIO_FILE"
     if pd.isna(row["genre_top"]) or str(row["genre_top"]).strip() == "":
         return "NO_LABEL"
+    if _is_excluded_genre_top(row["genre_top"]):
+        return "EXCLUDED_LABEL"
     if pd.isna(row["split"]) or row["split"] not in _VALID_SPLITS:
         return "NO_SPLIT"
     if not pd.isna(row["duration_s"]) and row["duration_s"] < min_duration_s:
@@ -253,9 +295,9 @@ def _assign_reason(row: pd.Series, min_duration_s: int) -> str:
 def phase_c_assign_reason(df: pd.DataFrame, min_duration_s: int) -> pd.DataFrame:
     """Assign exactly one ``reason_code`` per row (vectorised where possible).
 
-    For fma_medium with fully intact data the expected outcome is:
-        NOT_IN_SUBSET  89 574  (large/small tracks in the full CSV)
-        OK             17 000
+    Rows marked ``EXCLUDED_LABEL`` remain in the full manifest for auditability
+    but are excluded from the train/val/test parquet exports because only
+    ``reason_code == 'OK'`` rows are written to those split files.
     """
     logging.info("Phase C: assigning reason codes (min_duration=%ds)", min_duration_s)
     df = df.copy()
@@ -355,6 +397,11 @@ def _write_report(df: pd.DataFrame, ok: pd.DataFrame, path: Path, subset: Option
     for genre, cnt in ok["genre_top"].value_counts().items():
         lines.append(f"  {genre:<28} {cnt:>7,}")
 
+    if "source" in ok.columns:
+        lines += ["", "── Source distribution (OK rows) ───────────────────────"]
+        for source, cnt in ok["source"].value_counts().items():
+            lines.append(f"  {source:<28} {cnt:>7,}")
+
     lines += ["", "── Artist leakage check (OK rows) ──────────────────────"]
     splits = {
         s: set(ok[ok["split"] == s]["artist_id"].dropna())
@@ -396,8 +443,11 @@ def phase_d_write(df: pd.DataFrame, out_dir: Path, config: dict) -> None:
     # Drop internal helper column before writing
     df_out = df.drop(columns=["_in_target_subset"], errors="ignore")
 
-    # Sort by track_id for reproducibility
-    df_out = df_out.sort_index()
+    # Sort by sample_id when available so mixed-source manifests remain stable.
+    if "sample_id" in df_out.columns:
+        df_out = df_out.sort_values("sample_id", kind="stable")
+    else:
+        df_out = df_out.sort_index()
 
     # Determine subset suffix for filenames
     subset_name = config.get("subset") if isinstance(config, dict) else None
@@ -448,8 +498,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--audio-root",
-        default=str(DEFAULT_AUDIO_ROOT),
-        help="Path to the audio folder (e.g. FMA/fma_medium).",
+        default=None,
+        help="Path to the audio folder. Defaults to FMA/fma_{subset} when omitted.",
+    )
+    p.add_argument(
+        "--source-name",
+        default=DEFAULT_SOURCE_NAME,
+        help="Source label written to the manifest identity columns.",
     )
     p.add_argument(
         "--metadata-root",
@@ -491,17 +546,21 @@ def main(argv: list[str] | None = None) -> int:
         datefmt="%H:%M:%S",
     )
 
+    resolved_audio_root = args.audio_root or str(default_audio_root_for_subset(args.subset))
+
     config = {
         "subset":         args.subset,
-        "audio_root":     args.audio_root,
+        "source_name":    args.source_name,
+        "audio_root":     resolved_audio_root,
         "metadata_root":  args.metadata_root,
         "out_dir":        args.out_dir,
         "min_duration_s": args.min_duration,
+        "excluded_genre_top_labels": sorted(_EXCLUDED_GENRE_TOP_LABELS),
         "decode_probe":   args.decode_probe,
         "generated_at":   time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
 
-    audio_root    = Path(args.audio_root)
+    audio_root    = Path(resolved_audio_root)
     metadata_root = Path(args.metadata_root)
     out_dir       = Path(args.out_dir)
 
@@ -509,7 +568,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # ── Phase A ───────────────────────────────────────────────────────────────
     tracks = load_tracks(metadata_root)
-    df = phase_a_collect(tracks, args.subset)
+    df = phase_a_collect(tracks, args.subset, args.source_name)
 
     # ── Phase B ───────────────────────────────────────────────────────────────
     df = phase_b_resolve(df, audio_root)

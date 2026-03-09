@@ -128,7 +128,9 @@ def configure_runtime_device(tf):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def load_metadata():
-    """Load tracks.csv and return the medium subset with valid genre_top labels."""
+    """Load tracks.csv and return the medium subset with valid genre_top labels.
+    Automatically excludes 'Experimental' genre from training.
+    """
     tracks = pd.read_csv(METADATA_DIR / "tracks.csv", header=[0, 1], index_col=0)
 
     # Keep only fma_medium subset
@@ -138,6 +140,13 @@ def load_metadata():
     # Keep only rows with a genre_top label
     has_genre = tracks["track", "genre_top"].notna()
     tracks = tracks[has_genre]
+
+    # EXCLUSION: Skip experimental genre
+    is_experimental = tracks["track", "genre_top"].str.lower() == "experimental"
+    if is_experimental.any():
+        n_exp = is_experimental.sum()
+        tracks = tracks[~is_experimental]
+        print(f"  [INFO] Excluded {n_exp} tracks with genre_top == 'Experimental'")
 
     return tracks
 

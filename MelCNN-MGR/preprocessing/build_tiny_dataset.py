@@ -62,6 +62,7 @@ DEFAULT_PROCESSED_DIR = _MELCNN_DIR / "data" / "processed"
 DEFAULT_OUTPUT_SUBSET = "tiny"
 DEFAULT_SEED = 42
 DEFAULT_GENRE_COL = "genre_top"
+DEFAULT_SOURCE_NAME = "fma"
 
 DEFAULT_TRAIN_PER_GENRE = 70
 DEFAULT_VAL_PER_GENRE = 15
@@ -170,6 +171,7 @@ def load_split(path: Path, name: str, genre_col: str = DEFAULT_GENRE_COL) -> pd.
 	df = pd.read_parquet(path)
 	if len(df) == 0:
 		raise ValueError(f"{name} parquet is empty: {path}")
+	df = ensure_identity_columns(df, name)
 	logging.info(
 		"Loaded %-5s | %6d rows × %d cols",
 		name, len(df), len(df.columns),
@@ -183,6 +185,35 @@ def load_split(path: Path, name: str, genre_col: str = DEFAULT_GENRE_COL) -> pd.
 			"", n_genres, top_str,
 			" …" if n_genres > 3 else "",
 		)
+	return df
+
+
+def ensure_identity_columns(df: pd.DataFrame, split_name: str) -> pd.DataFrame:
+	"""Ensure split parquets expose source/sample_id for multi-source compatibility."""
+	df = df.copy()
+	track_ids = df.index.to_series().astype(str)
+
+	if "source" not in df.columns:
+		df["source"] = DEFAULT_SOURCE_NAME
+		logging.warning(
+			"Split %r has no 'source' column; defaulting all rows to %r.",
+			split_name, DEFAULT_SOURCE_NAME,
+		)
+	else:
+		df["source"] = df["source"].fillna(DEFAULT_SOURCE_NAME).astype(str)
+
+	default_sample_ids = df["source"].astype(str) + ":" + track_ids
+	if "sample_id" not in df.columns:
+		df["sample_id"] = default_sample_ids
+		logging.warning(
+			"Split %r has no 'sample_id' column; synthesizing values from source + track_id.",
+			split_name,
+		)
+	else:
+		missing_sample_id = df["sample_id"].isna() | (df["sample_id"].astype(str).str.strip() == "")
+		df.loc[missing_sample_id, "sample_id"] = default_sample_ids.loc[missing_sample_id]
+		df["sample_id"] = df["sample_id"].astype(str)
+
 	return df
 
 
@@ -246,7 +277,11 @@ def sample_split_per_genre(
 	for g, cnt in genre_counts.items():
 		logging.debug("  %-*s  %d", max_genre_len, g, cnt)
 
-	sampled = pd.concat(parts).sort_index()
+	sampled = pd.concat(parts)
+	if "sample_id" in sampled.columns:
+		sampled = sampled.sort_values("sample_id", kind="stable")
+	else:
+		sampled = sampled.sort_index()
 	total = len(sampled)
 	logging.info(
 		"  → %d total rows sampled (%d genres, avg %.1f/genre)",

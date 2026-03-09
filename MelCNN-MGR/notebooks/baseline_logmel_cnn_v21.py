@@ -1,8 +1,9 @@
 # %% [markdown]
-# # FMA Baseline - Log-Mel → 2D CNN (Version 20a1)
+# # FMA Baseline - Log-Mel → 2D CNN (Version 21)
 #
-# **Accuracy-focused upgrade** — builds on v20a with deeper architecture,
-# reduced mel bands, cosine LR schedule, and improved regularization.
+# **15-second training variant** — builds on v20a1 with the same core model and
+# training strategy, but uses 15-second log-mel inputs and random train-time
+# crop selection over any valid 15-second window.
 #
 # Key improvements over v20a:
 # - **Deeper architecture** — 5 conv blocks (32→64→128→256→256), +SpatialDropout2D
@@ -21,14 +22,14 @@
 # - `docs/Final-Project-Proposal.md`
 
 # %% [markdown]
-# ## Changelog — v20a → v20a1
+# ## Changelog — v20a1 → v21
 #
 # | # | Section | What changed | Why |
 # |---|---------|-------------|-----|
 # | 1 | Config | `N_MELS` 256 → 128 | Smoother frequency representation; 256 was near-1:1 with FFT bins |
 # | 2 | Config | `BATCH_SIZE` 16 → 32 | More stable gradients |
 # | 3 | Config | SpecAugment unchanged (15/25/2) | Kept v20a params; no coverage change in this version |
-# | 4 | Config | Cache dir `logmel_v20a1_10s` | Separate namespace (different N_MELS) |
+# | 4 | Config | Cache dir `logmel_v21_15s` | Separate namespace (different clip duration / frame count) |
 # | 5 | Model (Section 6) | 5 conv blocks (32→64→128→256→256) | Deeper capacity for 16-class task |
 # | 6 | Model (Section 6) | BN ordering: Conv(linear)→BN→ReLU | Normalize pre-activation values |
 # | 7 | Model (Section 6) | SpatialDropout2D(0.10) after blocks 2 & 3 | Regularize intermediate feature maps |
@@ -36,19 +37,15 @@
 # | 9 | Compile (Section 7) | EarlyStopping re-enabled (patience=9) | Stop overfitting, restore best weights |
 # | 10 | Compile (Section 7) | _MacroF1Checkpoint added | Persist best val_macro_f1 model to disk |
 #
-# ### Training behavior: v20a vs v20a1
+# ### Training behavior: v20a1 vs v21
 #
-# | Aspect | v20a | v20a1 |
+# | Aspect | v20a1 | v21 |
 # |--------|------|-------|
-# | N_MELS | 256 | 128 |
-# | Batch size | 16 | 32 |
-# | Architecture | 4 blocks (32→64→128→128) | 5 blocks (32→64→128→256→256) |
-# | BN ordering | Conv(ReLU)→BN | Conv(linear)→BN→ReLU |
-# | SpatialDropout | None | 0.10 after blocks 2 & 3 |
-# | SpecAugment | freq=15, time=25, masks=2 | freq=15, time=25, masks=2 (unchanged) |
-# | LR schedule | ReduceLROnPlateau(patience=3) | Cosine annealing + 3-epoch warmup |
-# | EarlyStopping | Disabled | Enabled (patience=9) |
-# | ModelCheckpoint | None | _MacroF1Checkpoint (saves best val_macro_f1) |
+# | Clip duration | 10 s | 15 s |
+# | Train crop | Random 10 s | Random 15 s |
+# | Val/test crop | Center 10 s | Center 15 s |
+# | Cache namespace | `logmel_v20a1_10s` | `logmel_v21_15s` |
+# | Model / training recipe | v20a1 architecture + optimizer stack | Same as v20a1 |
 
 # %% [markdown]
 # ## 1. Imports
@@ -129,12 +126,12 @@ SKIP_SILENT   = False
 SILENCE_PEAK  = 1e-4
 SILENCE_STD   = 1e-5
 
-# -- Clip duration (Strategy 1: deterministic center extraction) ---------------
-CLIP_DURATION = 10.0   # seconds — center-crop / center-pad target
+# -- Clip duration -------------------------------------------------------------
+CLIP_DURATION = 15.0   # seconds — random crop for train, center-crop / center-pad otherwise
 
 # -- Cache layout (per-track, separate from v20 cache) -------------------------
 LOGMEL_CACHE_SHARED = True
-LOGMEL_CACHE_DIR = CACHE_DIR / "logmel_v20_10s" / ("shared" if LOGMEL_CACHE_SHARED else SUBSET)
+LOGMEL_CACHE_DIR = CACHE_DIR / "logmel_v21_15s" / ("shared" if LOGMEL_CACHE_SHARED else SUBSET)
 
 # -- Training hyperparameters --------------------------------------------------
 EPOCHS        = 99
@@ -154,7 +151,7 @@ SAMPLE_RATE   = 22050
 N_MELS        = 192
 N_FFT         = 512
 HOP_LENGTH    = 256
-N_FRAMES      = int(CLIP_DURATION * SAMPLE_RATE / HOP_LENGTH)   # 861 for 10s
+N_FRAMES      = int(CLIP_DURATION * SAMPLE_RATE / HOP_LENGTH)   # 1291 for 15s
 LOGMEL_SHAPE  = (N_MELS, N_FRAMES)
 
 print(f"[Clip] CLIP_DURATION={CLIP_DURATION}s  →  N_FRAMES={N_FRAMES}  →  LOGMEL_SHAPE={LOGMEL_SHAPE}")
@@ -377,18 +374,18 @@ print(f"Genre distribution plot : {_section_times['3b. Genre plot']:.2f}s")
 # %% [markdown]
 # ## 4. Log-Mel Feature Extraction
 #
-# Each original audio clip is first **normalized to exactly 10 seconds** using
+# Each original audio clip is first **normalized to exactly 15 seconds** using
 # random crop for train tracks (or center-crop for val/test, center-pad for clips
-# shorter than 10 s). The 10-second waveform is then transformed into a 128-band
-# log-mel spectrogram with `n_fft=512`, `hop_length=256`, yielding a `(128, 861)` matrix.
+# shorter than 15 s). The 15-second waveform is then transformed into a 192-band
+# log-mel spectrogram with `n_fft=512`, `hop_length=256`, yielding a `(192, 1291)` matrix.
 #
 # ### Waveform normalization pipeline (per track)
 #
 # 1. **Load** full audio clip (no duration cap)
 # 2. **Sanity check** (non-empty, finite, minimum length)
-# 3. **`normalize_to_fixed_duration()`** — random crop (train) / center-crop (val/test) if > 10 s, center-pad if < 10 s
-# 4. **Extract** log-mel spectrogram → fixed `(128, 861)` shape
-# 5. **Cache** as `.npy` in `logmel_10s/` directory
+# 3. **`normalize_to_fixed_duration()`** — random crop (train) / center-crop (val/test) if > 15 s, center-pad if < 15 s
+# 4. **Extract** log-mel spectrogram → fixed `(192, 1291)` shape
+# 5. **Cache** as `.npy` in `logmel_v21_15s/` directory
 #
 # ### Corrupt or unreadable tracks
 #
@@ -436,7 +433,7 @@ def _split_fingerprint(split_df: pd.DataFrame) -> str:
 
 
 def _logmel_index_path(split_name: str, split_fingerprint: str) -> Path:
-    return CACHE_DIR / f"logmel_v20a1_10s_index_{split_name}_{SUBSET}_{split_fingerprint}.parquet"
+    return CACHE_DIR / f"logmel_v21_15s_index_{split_name}_{SUBSET}_{split_fingerprint}.parquet"
 
 
 def _load_audio_ffmpeg(filepath: Path, sr: int, mono: bool = True, duration: float = None) -> np.ndarray:
@@ -648,7 +645,7 @@ def build_logmel_index(
         if cache_dir.exists():
             import shutil
             shutil.rmtree(cache_dir, ignore_errors=True)
-        for stale_index_path in CACHE_DIR.glob(f"logmel_v20a1_10s_index_{split_name}_{SUBSET}*.parquet"):
+        for stale_index_path in CACHE_DIR.glob(f"logmel_v21_15s_index_{split_name}_{SUBSET}*.parquet"):
             stale_index_path.unlink(missing_ok=True)
 
     if index_path.exists():
@@ -873,7 +870,7 @@ def spec_augment(x, freq_mask=SPEC_AUG_FREQ_MASK, time_mask=SPEC_AUG_TIME_MASK,
     """SpecAugment: random frequency and time masking on a (N_MELS, N_FRAMES, 1) tensor."""
     shape = tf.shape(x)
     freq_dim = shape[0]   # N_MELS = 128
-    time_dim = shape[1]   # N_FRAMES = 861
+    time_dim = shape[1]   # N_FRAMES = 1291 for 15 s clips
 
     for _ in range(num_masks):
         # Frequency mask — clamp mask size to actual dimension so config changes
@@ -939,16 +936,16 @@ print(f"\nPreprocessing : {_section_times['5. Preprocessing']:.2f}s")
 # %% [markdown]
 # ## 6. Build the CNN Model
 #
-# Deeper v20a1 architecture with 5 conv blocks, proper BN ordering
+# v21 architecture: same backbone as v20a1, with 15-second inputs
 # (Conv→BN→ReLU), SpatialDropout2D, and increased filter capacity.
 #
-# | Block | Layer | Kernel | Pool | Output shape (128×861 input) |
-# |-------|-------|--------|------|-------------------------------|
-# | 1 | Conv2D(32) + BN + ReLU + MaxPool(2,2) | (5,5) | (2,2) | (64, 430, 32) |
-# | 2 | Conv2D(64) + BN + ReLU + SpatialDrop(0.10) + MaxPool(2,2) | (3,3) | (2,2) | (32, 215, 64) |
-# | 3 | Conv2D(128) + BN + ReLU + SpatialDrop(0.10) + MaxPool(2,2) | (3,3) | (2,2) | (16, 107, 128) |
-# | 4 | Conv2D(256) + BN + ReLU + MaxPool(2,2) | (3,3) | (2,2) | (8, 53, 256) |
-# | 5 | Conv2D(256) + BN + ReLU + MaxPool(2,2) | (3,3) | (2,2) | (4, 26, 256) |
+# | Block | Layer | Kernel | Pool | Output shape (192×1291 input) |
+# |-------|-------|--------|------|--------------------------------|
+# | 1 | Conv2D(32) + BN + ReLU + MaxPool(2,2) | (5,5) | (2,2) | (96, 645, 32) |
+# | 2 | Conv2D(64) + BN + ReLU + SpatialDrop(0.10) + MaxPool(2,2) | (3,3) | (2,2) | (48, 322, 64) |
+# | 3 | Conv2D(128) + BN + ReLU + SpatialDrop(0.10) + MaxPool(2,2) | (3,3) | (2,2) | (24, 161, 128) |
+# | 4 | Conv2D(256) + BN + ReLU + MaxPool(2,2) | (3,3) | (2,2) | (12, 80, 256) |
+# | 5 | Conv2D(256) + BN + ReLU + MaxPool(2,2) | (3,3) | (2,2) | (6, 40, 256) |
 # | Head | GAP + Dropout(0.2) + Dense | — | — | (N_CLASSES,) |
 
 # %%
@@ -994,7 +991,7 @@ def build_model(n_classes: int) -> keras.Model:
     x = layers.Dropout(0.2, name="dropout")(x)
     outputs = layers.Dense(n_classes, activation="softmax", name="fc_out")(x)
 
-    return keras.Model(inputs, outputs, name="logmel_2dcnn_v20a1")
+    return keras.Model(inputs, outputs, name="logmel_2dcnn_v21")
 
 with tf.device(RUNTIME_DEVICE):
     model = build_model(N_CLASSES)
@@ -1014,7 +1011,7 @@ import json as _json
 _t0 = _time_module.perf_counter()
 
 _run_ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-RUN_DIR = MODELS_BASE_DIR / f"logmel-cnn-v20a1-{_run_ts}"
+RUN_DIR = MODELS_BASE_DIR / f"logmel-cnn-v21-{_run_ts}"
 RUN_DIR.mkdir(parents=True, exist_ok=True)
 print(f"Run directory : {RUN_DIR}")
 
@@ -1206,7 +1203,7 @@ for k in ["val_accuracy", "val_loss", "accuracy", "loss"]:
 _section_times["7. Compile & train"] = _time_module.perf_counter() - _t0
 print(f"\nCompile & train : {_section_times['7. Compile & train']:.1f}s  ({_section_times['7. Compile & train']/_n_ep:.1f}s per epoch)")
 
-model_path = RUN_DIR / "baseline_logmel_cnn_v20a1.keras"
+model_path = RUN_DIR / "baseline_logmel_cnn_v21.keras"
 model.save(str(model_path))
 print(f"Model saved  -> {model_path}")
 
@@ -1222,12 +1219,12 @@ _summary_lines = []
 model.summary(print_fn=lambda l: _summary_lines.append(l))
 
 _report = {
-    "run_id":       f"logmel-cnn-v20a1-{_run_ts}",
+    "run_id":       f"logmel-cnn-v21-{_run_ts}",
     "subset":       SUBSET,
     "generated_at": _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     "model_file":   model_path.name,
     "feature_type": "logmel",
-    "version":      "v20a1",
+    "version":      "v21",
     "config": {
         "device":        RUNTIME_DEVICE,
         "audio_backend": AUDIO_BACKEND,
@@ -1265,7 +1262,7 @@ _report = {
                 "num_masks": SPEC_AUG_NUM_MASKS,
             },
         },
-        "architecture_changes": "v20a1_deeper_5block_proper_bn_spatial_dropout",
+        "architecture_changes": "v21_15s_inputs_same_backbone_as_v20a1",
     },
     "dataset": {
         "n_classes":     N_CLASSES,
@@ -1404,7 +1401,7 @@ if _f1_ckpt.f1_history:
     for spine in ["top", "right"]:
         ax_f1.spines[spine].set_visible(False)
 
-fig.suptitle("Training history -- Log-Mel 2D CNN v20a1 (10s random crop)", fontsize=13)
+fig.suptitle("Training history -- Log-Mel 2D CNN v21 (15s random crop)", fontsize=13)
 plt.tight_layout()
 plt.show()
 
@@ -1612,7 +1609,7 @@ cm       = confusion_matrix(y_test_true,  y_test_pred)
 fig, ax = plt.subplots(figsize=(13, 11))
 disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=GENRE_CLASSES)
 disp.plot(ax=ax, xticks_rotation=45, colorbar=True, cmap="Blues", values_format="d")
-ax.set_title("Confusion matrix -- test set (log-mel v20a1, 10s)", fontsize=13, pad=14)
+ax.set_title("Confusion matrix -- test set (log-mel v21, 15s)", fontsize=13, pad=14)
 plt.tight_layout()
 plt.show()
 
@@ -1651,7 +1648,7 @@ else:
 
 # -- 3-crop extraction ---------------------------------------------------------
 def extract_three_crops(y: np.ndarray, sr: int, target_sec: float) -> list[np.ndarray]:
-    """Extract 3 deterministic 10-second crops from a waveform.
+    """Extract 3 deterministic target-duration crops from a waveform.
 
     For clips longer than 3 * target_sec:
       - early crop:  centered at 25% of clip duration

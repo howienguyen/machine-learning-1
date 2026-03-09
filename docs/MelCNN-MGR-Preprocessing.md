@@ -62,7 +62,7 @@ Example: `track_id = 2` → `000/000002.mp3`, `track_id = 1000` → `001/001000.
 
 This phase turns “candidates” into “usable samples”, while keeping an audit trail.
 
-You should not simply drop bad rows silently. Instead, record a `reason_code` per row and keep the row in `metadata_manifest.parquet` for debugging. Training then filters to `reason_code == "OK"`.
+You should not simply drop bad rows silently. Instead, record a `reason_code` per row and keep the row in `metadata_manifest.parquet` for debugging. Training then filters to `reason_code == "OK"`, so any row marked `EXCLUDED_LABEL` is audited in the full manifest but never exported into `train_{subset}.parquet`, `val_{subset}.parquet`, or `test_{subset}.parquet`.
 
 **Typical filtering rules:**
 
@@ -70,6 +70,7 @@ You should not simply drop bad rows silently. Instead, record a `reason_code` pe
 | --------------------------------------- | --------------------------------------- | ------------------- | ------------------ |
 | audio file missing                      | prevents runtime crashes / missing data | `NO_AUDIO_FILE`     | 0 missing (all 17 000 present; still check defensively) |
 | missing label (`genre_top` is null)     | no supervised target                    | `NO_LABEL`          | 0 nulls in medium subset |
+| label intentionally excluded            | enforce training label policy           | `EXCLUDED_LABEL`    | use for labels such as `Experimental` that you do not want in any split |
 | not in desired subset                   | avoid training on unexpected data       | `NOT_IN_SUBSET`     | 89 574 tracks outside medium in full tracks.csv |
 | split missing/unknown                   | prevents leakage or undefined eval      | `NO_SPLIT`          | all medium rows have a split |
 | decode fails (optional but recommended) | corrupt file can kill an epoch          | `DECODE_FAIL`       | rare; still worth probing |
@@ -143,6 +144,7 @@ A consistent reason code taxonomy turns chaos into counts.
 | `OK`                 | usable sample                     | include                       |
 | `NO_AUDIO_FILE`      | metadata row but file missing     | fix dataset / re-download     |
 | `NO_LABEL`           | label missing                     | drop or define label policy   |
+| `EXCLUDED_LABEL`     | label intentionally excluded      | keep in manifest; never export to train/val/test |
 | `NO_SPLIT`           | no split assignment               | use official split or rebuild |
 | `DECODE_FAIL`        | cannot decode audio               | drop; optionally re-encode    |
 | `TOO_SHORT`          | shorter than required clip length | drop or pad with caution      |
@@ -223,7 +225,7 @@ The metadata manifest builder is best treated as a deterministic “build step�
 | Load metadata             | read `tracks.csv` and extract needed columns | pin the exact metadata version |
 | Compute expected filepath | map `track_id → path`                        | pure function                  |
 | Scan filesystem           | check existence + size                       | depends only on disk state     |
-| Apply label policy        | drop/flag missing label                      | pure rule                      |
+| Apply label policy        | drop/flag missing or excluded label          | pure rule                      |
 | Apply split policy        | join official split or compute grouped split | must be stable (fixed seed)    |
 | Optional decode probe     | attempt decode to catch corrupt audio        | cache results                  |
 | Assign reason_code        | exactly one code per row                     | deterministic rules            |

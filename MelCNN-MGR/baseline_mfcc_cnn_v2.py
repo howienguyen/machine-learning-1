@@ -33,6 +33,7 @@ Outputs:
 """
 
 import argparse
+import hashlib
 import os
 import sys
 import time
@@ -136,8 +137,11 @@ def load_manifest_splits(
     """Load the pre-built manifest split parquets produced by build_manifest.py.
 
     Each parquet contains only ``reason_code == OK`` rows for the given subset,
-    with flat columns: ``filepath``, ``genre_top``, ``split``, ``artist_id``,
-    ``duration_s``, ``bit_rate``, ``filesize_bytes``, ``audio_exists``.
+    so rows flagged upstream as ``EXCLUDED_LABEL`` (for example,
+    ``genre_top == 'Experimental'``) never appear here. Flat columns include
+    ``sample_id``, ``source``, ``filepath``, ``genre_top``, ``split``,
+    ``artist_id``, ``duration_s``, ``bit_rate``, ``filesize_bytes``,
+    ``audio_exists``.
 
     Parameters
     ----------
@@ -150,7 +154,8 @@ def load_manifest_splits(
 
     Returns
     -------
-    (train_df, val_df, test_df) — DataFrames indexed by ``track_id``.
+    (train_df, val_df, test_df) — DataFrames indexed by ``track_id`` and also
+    carrying explicit ``sample_id`` / ``source`` columns for multi-source use.
     """
     def _load(name: str) -> pd.DataFrame:
         path = processed_dir / f"{name}_{subset}.parquet"
@@ -171,6 +176,26 @@ def load_manifest_splits(
     return train_df, val_df, test_df
 
 
+def resolve_sample_id(row: pd.Series, track_id: int) -> str:
+    source = str(row.get("source") or "fma")
+    sample_id = row.get("sample_id")
+    sample_id = "" if sample_id is None else str(sample_id).strip()
+    if not sample_id or sample_id.lower() == "nan":
+        sample_id = f"{source}:{track_id}"
+    return sample_id
+
+
+def split_fingerprint(split_df: pd.DataFrame) -> str:
+    hasher = hashlib.sha1()
+    identities = []
+    for track_id, row in split_df.iterrows():
+        identities.append(resolve_sample_id(row, int(track_id)))
+    for sample_id in sorted(identities):
+        hasher.update(sample_id.encode("utf-8"))
+        hasher.update(b"\n")
+    return hasher.hexdigest()[:12]
+
+
 def extract_split(
     split_df: pd.DataFrame,
     split_name: str,
@@ -188,8 +213,9 @@ def extract_split(
       y : int32   ndarray  shape (N,)   — encoded genre class index
     """
     cache_dir.mkdir(parents=True, exist_ok=True)
-    x_path = cache_dir / f"mfcc_{split_name}_{subset}.npy"
-    y_path = cache_dir / f"mfcc_{split_name}_{subset}_labels.npy"
+        fingerprint = split_fingerprint(split_df)
+        x_path = cache_dir / f"mfcc_{split_name}_{subset}_{fingerprint}.npy"
+        y_path = cache_dir / f"mfcc_{split_name}_{subset}_{fingerprint}_labels.npy"
 
     if x_path.exists() and y_path.exists():
         print(f"  Loading {split_name} from cache …")

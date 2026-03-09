@@ -72,6 +72,7 @@
 
 # %%
 import sys
+import hashlib
 import time
 import warnings
 from pathlib import Path
@@ -264,6 +265,11 @@ print(f"Device setup : {_section_times['2. Device setup']:.2f}s")
 _t0 = _time_module.perf_counter()
 
 def load_manifest_splits(processed_dir: Path, subset: str):
+    """Load split parquets already filtered to ``reason_code == 'OK'``.
+
+    Any rows marked upstream as ``EXCLUDED_LABEL`` are present only in the full
+    manifest and never appear in these train/val/test split files.
+    """
     def _load(name: str) -> pd.DataFrame:
         path = processed_dir / f"{name}_{subset}.parquet"
         if not path.exists():
@@ -421,11 +427,33 @@ import subprocess
 import concurrent.futures as _fut
 
 
-def _track_id_from_path(filepath: Path) -> int:
-    try:
-        return int(Path(filepath).stem)
-    except Exception:
-        return abs(hash(str(filepath))) % (10**12)
+def _resolve_sample_identity(row: pd.Series, track_id: int) -> tuple[str, str]:
+    source = str(row.get("source") or "fma")
+    sample_id = row.get("sample_id")
+    sample_id = "" if sample_id is None else str(sample_id).strip()
+    if not sample_id or sample_id.lower() == "nan":
+        sample_id = f"{source}:{track_id}"
+    return sample_id, source
+
+
+def _sample_cache_stem(sample_id: str) -> str:
+    return hashlib.sha1(sample_id.encode("utf-8")).hexdigest()[:20]
+
+
+def _split_fingerprint(split_df: pd.DataFrame) -> str:
+    hasher = hashlib.sha1()
+    identities = []
+    for track_id, row in split_df.iterrows():
+        sample_id, _ = _resolve_sample_identity(row, int(track_id))
+        identities.append(sample_id)
+    for sample_id in sorted(identities):
+        hasher.update(sample_id.encode("utf-8"))
+        hasher.update(b"\n")
+    return hasher.hexdigest()[:12]
+
+
+def _logmel_index_path(split_name: str, split_fingerprint: str) -> Path:
+    return CACHE_DIR / f"logmel_v20a_10s_index_{split_name}_{SUBSET}_{split_fingerprint}.parquet"
 
 
 def _load_audio_ffmpeg(filepath: Path, sr: int, mono: bool = True, duration: float = None) -> np.ndarray:
@@ -525,9 +553,9 @@ def _is_valid_npy(path: Path, expected_shape: tuple) -> bool:
 
 
 def _process_one_track(task: tuple) -> dict:
-    filepath_str, split_name, genre_top, track_id, logmel_cache_dir = task
+    filepath_str, split_name, genre_top, track_id, sample_id, source, logmel_cache_dir = task
     filepath = Path(filepath_str)
-    logmel_path = Path(logmel_cache_dir) / f"{track_id}.npy"
+    logmel_path = Path(logmel_cache_dir) / f"{_sample_cache_stem(sample_id)}.npy"
 
     _corrupt_deleted = False
 
@@ -535,6 +563,8 @@ def _process_one_track(task: tuple) -> dict:
         if _is_valid_npy(logmel_path, LOGMEL_SHAPE):
             return {
                 "track_id": track_id,
+                "sample_id": sample_id,
+                "source": source,
                 "filepath": filepath_str,
                 "split": split_name,
                 "genre_top": genre_top,
@@ -557,6 +587,8 @@ def _process_one_track(task: tuple) -> dict:
     except Exception as exc:
         return {
             "track_id": track_id,
+            "sample_id": sample_id,
+            "source": source,
             "filepath": filepath_str,
             "split": split_name,
             "genre_top": genre_top,
@@ -570,6 +602,8 @@ def _process_one_track(task: tuple) -> dict:
     if not ok:
         return {
             "track_id": track_id,
+            "sample_id": sample_id,
+            "source": source,
             "filepath": filepath_str,
             "split": split_name,
             "genre_top": genre_top,
@@ -588,6 +622,8 @@ def _process_one_track(task: tuple) -> dict:
         np.save(logmel_path, logmel)
         return {
             "track_id": track_id,
+            "sample_id": sample_id,
+            "source": source,
             "filepath": filepath_str,
             "split": split_name,
             "genre_top": genre_top,
@@ -614,17 +650,18 @@ def build_logmel_index(
     split_name: str,
     cache_dir: Path,
     num_workers: int,
+    split_fingerprint: str,
     clear_cache: bool = False,
 ) -> pd.DataFrame:
     cache_dir.mkdir(parents=True, exist_ok=True)
-    index_path = CACHE_DIR / f"logmel_v20a_10s_index_{split_name}_{SUBSET}.parquet"
+    index_path = _logmel_index_path(split_name, split_fingerprint)
 
     if clear_cache:
         if cache_dir.exists():
             import shutil
             shutil.rmtree(cache_dir, ignore_errors=True)
-        if index_path.exists():
-            index_path.unlink()
+        for stale_index_path in CACHE_DIR.glob(f"logmel_v20a_10s_index_{split_name}_{SUBSET}*.parquet"):
+            stale_index_path.unlink(missing_ok=True)
 
     if index_path.exists():
         print(f"  [{split_name}] Loading log-mel index from cache ...")
@@ -632,11 +669,11 @@ def build_logmel_index(
 
     print(f"  [{split_name}] Building log-mel cache with {num_workers} workers ...")
     tasks = []
-    for row in split_df.itertuples(index=False):
-        fp = getattr(row, "filepath") if hasattr(row, "filepath") else row[split_df.columns.get_loc("filepath")]
-        gt = getattr(row, "genre_top") if hasattr(row, "genre_top") else row[split_df.columns.get_loc("genre_top")]
-        tid = _track_id_from_path(fp)
-        tasks.append((str(fp), split_name, str(gt), int(tid), str(cache_dir)))
+    for track_id, row in split_df.iterrows():
+        fp = row["filepath"]
+        gt = row["genre_top"]
+        sample_id, source = _resolve_sample_identity(row, int(track_id))
+        tasks.append((str(fp), split_name, str(gt), int(track_id), sample_id, source, str(cache_dir)))
 
     results = []
     skipped = 0
@@ -666,9 +703,13 @@ print("Building/loading log-mel per-track cache + index parquets ...")
 print(f"  clip duration = {CLIP_DURATION}s  |  cache dir = {LOGMEL_CACHE_DIR}")
 print()
 
-train_index = build_logmel_index(train_df, "training",   LOGMEL_CACHE_DIR, NUM_WORKERS, clear_cache=CLEAR_CACHE)
-val_index   = build_logmel_index(val_df,   "validation", LOGMEL_CACHE_DIR, NUM_WORKERS, clear_cache=CLEAR_CACHE)
-test_index  = build_logmel_index(test_df,  "test",       LOGMEL_CACHE_DIR, NUM_WORKERS, clear_cache=CLEAR_CACHE)
+train_split_fingerprint = _split_fingerprint(train_df)
+val_split_fingerprint = _split_fingerprint(val_df)
+test_split_fingerprint = _split_fingerprint(test_df)
+
+train_index = build_logmel_index(train_df, "training",   LOGMEL_CACHE_DIR, NUM_WORKERS, train_split_fingerprint, clear_cache=CLEAR_CACHE)
+val_index   = build_logmel_index(val_df,   "validation", LOGMEL_CACHE_DIR, NUM_WORKERS, val_split_fingerprint, clear_cache=CLEAR_CACHE)
+test_index  = build_logmel_index(test_df,  "test",       LOGMEL_CACHE_DIR, NUM_WORKERS, test_split_fingerprint, clear_cache=CLEAR_CACHE)
 
 def _usable(df: pd.DataFrame) -> pd.DataFrame:
     return df[df["status"].isin(["ok", "cached"])].reset_index(drop=True)
@@ -698,7 +739,15 @@ def _reextract_corrupt(
     if len(corrupt_df) == 0:
         return corrupt_df
     tasks = [
-        (row["filepath"], row["split"], row["genre_top"], int(row["track_id"]), str(LOGMEL_CACHE_DIR))
+        (
+            row["filepath"],
+            row["split"],
+            row["genre_top"],
+            int(row["track_id"]),
+            row["sample_id"],
+            row.get("source", "fma"),
+            str(LOGMEL_CACHE_DIR),
+        )
         for _, row in corrupt_df.iterrows()
     ]
     results, n_ok, n_skip = [], 0, 0
@@ -716,24 +765,24 @@ def _reextract_corrupt(
     # Persist updated index — replace old corrupt rows with fresh results
     updated_full = (
         pd.concat([full_index_df, repaired_df])
-        .drop_duplicates(subset=["track_id"], keep="last")
+        .drop_duplicates(subset=["sample_id"], keep="last")
         .reset_index(drop=True)
     )
     updated_full.to_parquet(index_path, index=False)
     return repaired_df[repaired_df["status"].isin(["ok", "cached"])].reset_index(drop=True)
 
 
-def _purge_and_repair(full_index: pd.DataFrame, split_name: str) -> pd.DataFrame:
+def _purge_and_repair(full_index: pd.DataFrame, split_name: str, split_fingerprint: str) -> pd.DataFrame:
     """Purge corrupt cache entries and immediately re-extract them in the same run."""
-    index_path = CACHE_DIR / f"logmel_v20a_10s_index_{split_name}_{SUBSET}.parquet"
+    index_path = _logmel_index_path(split_name, split_fingerprint)
     clean_df, corrupt_df = _purge_corrupt(_usable(full_index), LOGMEL_SHAPE)
     repaired_df = _reextract_corrupt(corrupt_df, full_index, index_path)
     return pd.concat([clean_df, repaired_df]).reset_index(drop=True)
 
 
-train_index_u = _purge_and_repair(train_index, "training")
-val_index_u   = _purge_and_repair(val_index,   "validation")
-test_index_u  = _purge_and_repair(test_index,  "test")
+train_index_u = _purge_and_repair(train_index, "training", train_split_fingerprint)
+val_index_u   = _purge_and_repair(val_index,   "validation", val_split_fingerprint)
+test_index_u  = _purge_and_repair(test_index,  "test", test_split_fingerprint)
 
 print("Usable rows:")
 print(f"  train: {len(train_index_u):,} / {len(train_index):,}")
@@ -752,12 +801,13 @@ row = train_index_u.iloc[idx_row]
 logmel = np.load(row["logmel_path"])
 genre = row["genre_top"]
 tid = row["track_id"]
+sample_id = row["sample_id"]
 
 fig, ax = plt.subplots(figsize=(14, 5))
 img = ax.imshow(logmel, aspect="auto", origin="lower",
                 extent=[0, N_FRAMES * HOP_LENGTH / SAMPLE_RATE, 0, N_MELS],
                 cmap="magma")
-ax.set_title(f"Sample log-mel spectrogram - genre: {genre}  (track_id={tid})")
+ax.set_title(f"Sample log-mel spectrogram - genre: {genre}  (track_id={tid}, sample_id={sample_id})")
 ax.set_xlabel("Time (s)")
 ax.set_ylabel("Mel band")
 plt.colorbar(img, ax=ax, label="log(1 + power)")

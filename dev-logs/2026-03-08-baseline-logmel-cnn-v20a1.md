@@ -317,3 +317,37 @@ After code review, the following corrections and improvements were applied:
 - Softened "misleading under class weights" wording to "secondary — interpret
   alongside Macro-F1 and per-genre F1" across Section 7 print, Section 8 plot
   title, and Section 9 summary. Accuracy is valid but incomplete, not invalid.
+
+---
+
+## Further improvements (2026-03-09)
+
+### `CosineAnnealingWithWarmup` — Keras serialization registration
+- Added `@tf.keras.saving.register_keras_serializable(package="MelCNN")` decorator.
+- Without this, `tf.keras.models.load_model()` on a saved checkpoint raised:
+  `TypeError: Cannot deserialize object of type 'CosineAnnealingWithWarmup'`.
+- Re-running training produces a loadable checkpoint; models saved before this fix
+  cannot be loaded without also registering the class manually.
+
+### Waveform cropping — random crop for train, center-crop for val/test
+- `normalize_to_fixed_duration()` gains a `random_crop: bool = False` parameter.
+- `_process_one_track()` passes `random_crop=(split_name == "train")`.
+- Training tracks now receive a uniformly random 10-second window, exposing the
+  model to varied temporal positions across cache rebuilds.
+- Val/test tracks retain deterministic center-crop for reproducible evaluation.
+- Config entry updated: `"random_crop_train__center_crop_val_test__center_pad_short"`.
+- **Cache note**: the crop position is baked into `.npy` files; clearing the train
+  split cache (parquet index + `.npy` files) is required to obtain new random crops.
+
+### `_MacroF1Checkpoint` — three-phase frequency schedule
+Previous two-phase (sparse/dense) replaced with three-phase:
+
+| Epoch range | `check_freq` | Extra val passes |
+|-------------|-------------|-----------------|
+| 0 – 29      | every 3     | ~10             |
+| 30 – 59     | every 2     | ~15             |
+| 60+         | every 1     | all             |
+
+New parameters: `mid_freq=2`, `mid_freq_from_epoch=30`, `dense_from_epoch=60`.
+Default `check_freq` changed from 1 → 3 (sparse phase default).
+Call-site updated with all four explicit kwargs for clarity.
