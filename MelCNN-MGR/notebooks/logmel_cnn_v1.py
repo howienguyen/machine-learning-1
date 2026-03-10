@@ -8,7 +8,7 @@
 #
 # This script treats the precomputed log-mel dataset as the authoritative model
 # input. Feature extraction should happen upstream via:
-# `MelCNN-MGR/preprocessing/load_and_build_log_mel_dataset.py`
+# `MelCNN-MGR/preprocessing/2_build_log_mel_dataset.py`
 
 # %% [markdown]
 # ## 1. Imports
@@ -167,7 +167,7 @@ def _load_logmel_manifest(path: Path, split_name: str) -> pd.DataFrame:
         msg_lines = [
             f"Log-mel manifest not found: {path}",
             "Run the upstream builder first:",
-            "  python MelCNN-MGR/preprocessing/load_and_build_log_mel_dataset.py",
+            "  python MelCNN-MGR/preprocessing/2_build_log_mel_dataset.py",
         ]
         raise FileNotFoundError(chr(10).join(msg_lines))
 

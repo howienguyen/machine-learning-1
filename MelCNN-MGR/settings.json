@@ -5,6 +5,7 @@
 			"Pop",
 			"Folk",
 			"Rock",
+			"Metal",
 			"Electronic",
 			"Classical",
 			"Jazz",
@@ -12,7 +13,7 @@
 			"Blues"
 		],
 		"number_of_samples_expected_each_genre": 1300,
-		"additional_samples_rate_expected_each_genre": 0.2,
+		"additional_samples_contribution_ratio_expected_each_genre": 0.39,
         "train_n_val_test_split_ratio_each_genre": 0.8,
 		"sample_length_sec": 10,
 		"min_duration_delta": 0.001

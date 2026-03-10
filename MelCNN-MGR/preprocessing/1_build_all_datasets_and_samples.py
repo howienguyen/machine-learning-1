@@ -70,6 +70,7 @@ DEFAULT_FMA_AUDIO_ROOT = _WORKSPACE / "FMA" / "fma_medium"
 DEFAULT_FMA_SUBSET = "medium"
 DEFAULT_MIN_DURATION_DELTA = 0.001
 DEFAULT_NUMBER_OF_SAMPLES_EXPECTED_EACH_GENRE = 1300
+DEFAULT_ADDITIONAL_SAMPLES_CONTRIBUTION_RATIO_EACH_GENRE = 0.0
 DEFAULT_TRAIN_RATIO_EACH_GENRE = 0.8
 DEFAULT_SPLIT_SEED = 1337
 
@@ -257,6 +258,22 @@ def load_data_sampling_settings(path: Path) -> dict[str, object]:
     ):
         number_of_samples_expected_each_genre = DEFAULT_NUMBER_OF_SAMPLES_EXPECTED_EACH_GENRE
 
+    additional_samples_contribution_ratio_each_genre = config.get(
+        "additional_samples_contribution_ratio_expected_each_genre",
+        config.get(
+            "additional_samples_rate_expected_each_genre",
+            DEFAULT_ADDITIONAL_SAMPLES_CONTRIBUTION_RATIO_EACH_GENRE,
+        ),
+    )
+    if (
+        not isinstance(additional_samples_contribution_ratio_each_genre, (int, float))
+        or additional_samples_contribution_ratio_each_genre < 0
+        or additional_samples_contribution_ratio_each_genre > 1
+    ):
+        additional_samples_contribution_ratio_each_genre = (
+            DEFAULT_ADDITIONAL_SAMPLES_CONTRIBUTION_RATIO_EACH_GENRE
+        )
+
     train_ratio_each_genre = config.get(
         "train_n_val_test_split_ratio_each_genre",
         DEFAULT_TRAIN_RATIO_EACH_GENRE,
@@ -273,6 +290,9 @@ def load_data_sampling_settings(path: Path) -> dict[str, object]:
         "sample_length_sec": float(sample_length_sec),
         "min_duration_delta": float(min_duration_delta),
         "number_of_samples_expected_each_genre": int(number_of_samples_expected_each_genre),
+        "additional_samples_contribution_ratio_expected_each_genre": float(
+            additional_samples_contribution_ratio_each_genre
+        ),
         "train_n_val_test_split_ratio_each_genre": float(train_ratio_each_genre),
     }
 
@@ -687,6 +707,81 @@ def _compute_final_split_targets(total_samples: int, train_ratio: float) -> dict
     }
 
 
+def _is_additional_source(source: object) -> bool:
+    value = "" if source is None else str(source).strip().casefold()
+    return not value.startswith("fma")
+
+
+def _allocate_proportional_counts(total_count: int, weights: dict[str, int]) -> dict[str, int]:
+    allocations = {split_name: 0 for split_name in _FINAL_SPLIT_ORDER}
+    total_weight = sum(max(int(weights.get(split_name, 0)), 0) for split_name in _FINAL_SPLIT_ORDER)
+    if total_count <= 0 or total_weight <= 0:
+        return allocations
+
+    remainders: list[tuple[float, int, str]] = []
+    assigned = 0
+    for split_index, split_name in enumerate(_FINAL_SPLIT_ORDER):
+        raw = total_count * max(int(weights.get(split_name, 0)), 0) / total_weight
+        base = int(math.floor(raw))
+        allocations[split_name] = base
+        assigned += base
+        remainders.append((raw - base, -split_index, split_name))
+
+    for _, _, split_name in sorted(remainders, reverse=True)[: max(0, total_count - assigned)]:
+        allocations[split_name] += 1
+
+    return allocations
+
+
+def _compute_additional_total_target(
+    total_target: int,
+    ratio: float,
+    additional_available: int,
+    primary_available: int,
+) -> int:
+    if total_target <= 0 or additional_available <= 0:
+        return 0
+
+    ideal_target = int(round(total_target * ratio))
+    minimum_needed = max(0, total_target - max(primary_available, 0))
+    maximum_possible = min(total_target, max(additional_available, 0))
+    return min(max(ideal_target, minimum_needed), maximum_possible)
+
+
+def _select_group_assignments(
+    grouped: pd.DataFrame,
+    split_targets: dict[str, int],
+) -> tuple[dict[str, str], dict[str, int]]:
+    assignments: dict[str, str] = {}
+    selected_counts = {split_name: 0 for split_name in _FINAL_SPLIT_ORDER}
+    remaining = {split_name: int(split_targets.get(split_name, 0)) for split_name in _FINAL_SPLIT_ORDER}
+
+    if grouped.empty or not any(value > 0 for value in remaining.values()):
+        return assignments, selected_counts
+
+    for group in grouped.itertuples(index=False):
+        candidate_splits = [split_name for split_name in _FINAL_SPLIT_ORDER if remaining[split_name] > 0]
+        if not candidate_splits:
+            break
+
+        sample_count = int(group.sample_count)
+        split_choice = min(
+            candidate_splits,
+            key=lambda split_name: (
+                max(sample_count - remaining[split_name], 0),
+                abs(remaining[split_name] - sample_count),
+                -remaining[split_name],
+                _FINAL_SPLIT_ORDER.index(split_name),
+            ),
+        )
+
+        assignments[str(group.group_sample_id)] = split_choice
+        selected_counts[split_choice] += sample_count
+        remaining[split_choice] -= sample_count
+
+    return assignments, selected_counts
+
+
 def _segment_group_id(sample_id: object) -> str:
     value = "" if sample_id is None else str(sample_id).strip()
     if not value or value.lower() == "nan":
@@ -697,6 +792,7 @@ def _segment_group_id(sample_id: object) -> str:
 def assign_final_splits(
     all_samples: pd.DataFrame,
     number_of_samples_expected_each_genre: int,
+    additional_samples_contribution_ratio_each_genre: float,
     train_ratio_each_genre: float,
     seed: int,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -708,7 +804,12 @@ def assign_final_splits(
     samples = all_samples.copy()
     if samples.empty:
         empty_summary = pd.DataFrame(
-            columns=["genre_top", "training", "validation", "test", "selected_total", "target_total"]
+            columns=[
+                "genre_top", "training", "validation", "test", "selected_total", "target_total",
+                "additional_target_total", "additional_selected_total", "additional_selected_ratio_pct",
+                "training_additional_target", "validation_additional_target", "test_additional_target",
+                "training_additional_selected", "validation_additional_selected", "test_additional_selected",
+            ]
         )
         return samples, samples.iloc[0:0].copy(), empty_summary
 
@@ -716,6 +817,7 @@ def assign_final_splits(
     working_samples["final_split"] = pd.Series([None] * len(working_samples), dtype="object")
     working_samples["selected_for_final_manifest"] = False
     working_samples["group_sample_id"] = working_samples["sample_id"].map(_segment_group_id)
+    working_samples["is_additional_source"] = working_samples["source"].map(_is_additional_source)
     summary_rows: list[dict[str, object]] = []
 
     for genre_index, genre in enumerate(sorted(working_samples["genre_top"].dropna().unique())):
@@ -723,33 +825,92 @@ def assign_final_splits(
         genre_df = working_samples.loc[genre_mask].copy()
         target_total = min(number_of_samples_expected_each_genre, len(genre_df))
         targets = _compute_final_split_targets(target_total, train_ratio_each_genre)
-        remaining = dict(targets)
-        selected_counts = {split: 0 for split in _FINAL_SPLIT_ORDER}
-        selected_total = 0
 
         grouped = (
             genre_df.groupby("group_sample_id", dropna=False)
-            .agg(sample_count=("sample_id", "size"))
+            .agg(
+                sample_count=("sample_id", "size"),
+                is_additional_source=("is_additional_source", "first"),
+            )
             .reset_index()
+        )
+
+        additional_grouped = (
+            grouped[grouped["is_additional_source"] == True]
             .sample(frac=1.0, random_state=seed + genre_index)
             .reset_index(drop=True)
         )
+        primary_grouped = (
+            grouped[grouped["is_additional_source"] == False]
+            .sample(frac=1.0, random_state=seed + 10_000 + genre_index)
+            .reset_index(drop=True)
+        )
 
-        for group in grouped.itertuples(index=False):
-            if selected_total >= target_total:
-                break
+        additional_available = int(additional_grouped["sample_count"].sum())
+        primary_available = int(primary_grouped["sample_count"].sum())
+        additional_target_total = _compute_additional_total_target(
+            target_total,
+            additional_samples_contribution_ratio_each_genre,
+            additional_available,
+            primary_available,
+        )
+        additional_targets = _allocate_proportional_counts(additional_target_total, targets)
+        primary_targets = {
+            split_name: max(targets[split_name] - additional_targets[split_name], 0)
+            for split_name in _FINAL_SPLIT_ORDER
+        }
 
-            split_choice = max(
-                _FINAL_SPLIT_ORDER,
-                key=lambda split_name: (remaining[split_name], -_FINAL_SPLIT_ORDER.index(split_name)),
-            )
-            group_mask = genre_mask & (working_samples["group_sample_id"] == group.group_sample_id)
+        additional_assignments, additional_selected_counts = _select_group_assignments(
+            additional_grouped,
+            additional_targets,
+        )
+        primary_assignments, primary_selected_counts = _select_group_assignments(
+            primary_grouped,
+            primary_targets,
+        )
+
+        selected_assignments = {**additional_assignments, **primary_assignments}
+        selected_counts = {
+            split_name: additional_selected_counts[split_name] + primary_selected_counts[split_name]
+            for split_name in _FINAL_SPLIT_ORDER
+        }
+
+        fallback_remaining = {
+            split_name: max(targets[split_name] - selected_counts[split_name], 0)
+            for split_name in _FINAL_SPLIT_ORDER
+        }
+        fallback_grouped = (
+            grouped[~grouped["group_sample_id"].astype(str).isin(selected_assignments.keys())]
+            .sample(frac=1.0, random_state=seed + 20_000 + genre_index)
+            .reset_index(drop=True)
+        )
+        fallback_assignments, fallback_selected_counts = _select_group_assignments(
+            fallback_grouped,
+            fallback_remaining,
+        )
+        selected_assignments.update(fallback_assignments)
+        selected_counts = {
+            split_name: selected_counts[split_name] + fallback_selected_counts[split_name]
+            for split_name in _FINAL_SPLIT_ORDER
+        }
+
+        for group_sample_id, split_choice in selected_assignments.items():
+            group_mask = genre_mask & (working_samples["group_sample_id"] == group_sample_id)
             working_samples.loc[group_mask, "final_split"] = split_choice
             working_samples.loc[group_mask, "selected_for_final_manifest"] = True
 
-            selected_total += int(group.sample_count)
-            selected_counts[split_choice] += int(group.sample_count)
-            remaining[split_choice] -= int(group.sample_count)
+        selected_grouped = grouped[grouped["group_sample_id"].astype(str).isin(selected_assignments.keys())].copy()
+        selected_grouped["assigned_split"] = selected_grouped["group_sample_id"].astype(str).map(selected_assignments)
+        selected_total = int(selected_grouped["sample_count"].sum())
+        additional_selected_total = int(
+            selected_grouped.loc[selected_grouped["is_additional_source"] == True, "sample_count"].sum()
+        )
+        additional_selected_by_split = (
+            selected_grouped[selected_grouped["is_additional_source"] == True]
+            .groupby("assigned_split")["sample_count"]
+            .sum()
+            .to_dict()
+        )
 
         summary_rows.append(
             {
@@ -757,8 +918,20 @@ def assign_final_splits(
                 "training": selected_counts["training"],
                 "validation": selected_counts["validation"],
                 "test": selected_counts["test"],
-                "selected_total": sum(selected_counts.values()),
+                "selected_total": selected_total,
                 "target_total": target_total,
+                "additional_target_total": additional_target_total,
+                "additional_selected_total": additional_selected_total,
+                "additional_selected_ratio_pct": round(
+                    (100.0 * additional_selected_total / selected_total) if selected_total else 0.0,
+                    2,
+                ),
+                "training_additional_target": additional_targets["training"],
+                "validation_additional_target": additional_targets["validation"],
+                "test_additional_target": additional_targets["test"],
+                "training_additional_selected": int(additional_selected_by_split.get("training", 0)),
+                "validation_additional_selected": int(additional_selected_by_split.get("validation", 0)),
+                "test_additional_selected": int(additional_selected_by_split.get("test", 0)),
             }
         )
 
@@ -1156,6 +1329,7 @@ def log_summary(
         logging.info("Final-samples rows: %d", len(final_samples))
         if not final_samples.empty:
             logging.info("Final sample rows by split:\n%s", final_samples.groupby("final_split").size().to_string())
+            logging.info("Final sample rows by source:\n%s", final_samples.groupby("source").size().to_string())
             logging.info("Final sample rows by genre:\n%s", final_samples.groupby("genre_top").size().sort_values(ascending=False).to_string())
 
     if all_datasets is not None:
@@ -1244,6 +1418,18 @@ def write_build_report(
                     f" {int(row.test):>7,} {int(row.selected_total):>7,} {int(row.target_total):>7,}"
                 )
 
+            lines += ["", "  Final per-genre additional-source contribution:"]
+            lines.append(
+                f"    {'Genre':<24} {'add_tgt':>7} {'add_sel':>7} {'add_%':>7} {'tr_add':>7} {'va_add':>7} {'te_add':>7}"
+            )
+            for row in split_summary.itertuples(index=False):
+                lines.append(
+                    f"    {row.genre_top:<24} {int(row.additional_target_total):>7,}"
+                    f" {int(row.additional_selected_total):>7,} {float(row.additional_selected_ratio_pct):>6.2f}%"
+                    f" {int(row.training_additional_selected):>7,} {int(row.validation_additional_selected):>7,}"
+                    f" {int(row.test_additional_selected):>7,}"
+                )
+
     lines += ["", sep]
     path.write_text("\n".join(lines) + "\n")
     logging.info("Wrote report: %s", path)
@@ -1271,6 +1457,9 @@ def main(argv: list[str] | None = None) -> int:
     sample_length_sec = float(settings["sample_length_sec"])
     min_duration_delta = float(settings["min_duration_delta"])
     number_of_samples_expected_each_genre = int(settings["number_of_samples_expected_each_genre"])
+    additional_samples_contribution_ratio_each_genre = float(
+        settings["additional_samples_contribution_ratio_expected_each_genre"]
+    )
     train_ratio_each_genre = float(settings["train_n_val_test_split_ratio_each_genre"])
     min_duration_s = (
         float(args.min_duration)
@@ -1294,6 +1483,7 @@ def main(argv: list[str] | None = None) -> int:
         "sample_length_sec": sample_length_sec,
         "min_duration_delta": min_duration_delta,
         "number_of_samples_expected_each_genre": number_of_samples_expected_each_genre,
+        "additional_samples_contribution_ratio_expected_each_genre": additional_samples_contribution_ratio_each_genre,
         "train_n_val_test_split_ratio_each_genre": train_ratio_each_genre,
         "split_seed": args.split_seed,
         "fma_subset": args.fma_subset,
@@ -1314,8 +1504,9 @@ def main(argv: list[str] | None = None) -> int:
     logging.info("Sample length: %.3fs", sample_length_sec)
     logging.info("Min-duration delta: %.3fs", min_duration_delta)
     logging.info(
-        "Per-genre final target: %d | train ratio: %.3f | split seed: %d",
+        "Per-genre final target: %d | additional contribution ratio: %.3f | train ratio: %.3f | split seed: %d",
         number_of_samples_expected_each_genre,
+        additional_samples_contribution_ratio_each_genre,
         train_ratio_each_genre,
         args.split_seed,
     )
@@ -1375,6 +1566,7 @@ def main(argv: list[str] | None = None) -> int:
         all_samples, final_samples, split_summary = assign_final_splits(
             all_samples,
             number_of_samples_expected_each_genre,
+            additional_samples_contribution_ratio_each_genre,
             train_ratio_each_genre,
             args.split_seed,
         )

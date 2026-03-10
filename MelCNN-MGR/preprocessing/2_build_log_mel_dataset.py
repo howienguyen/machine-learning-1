@@ -323,6 +323,7 @@ def _load_manifest(path: Path, row_limit: int | None) -> pd.DataFrame:
         "sample_id",
         "filepath",
         "genre_top",
+        "segment_index",
         "segment_start_sec",
         "sample_length_sec",
     }
@@ -487,7 +488,7 @@ def _write_report(frame: pd.DataFrame, out_root: Path, config: dict[str, object]
     sep = "=" * 62
     lines.extend([
         sep,
-        "load_and_build_log_mel_dataset report",
+        "2_build_log_mel_dataset report",
         f"Generated : {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}",
         sep,
         "",

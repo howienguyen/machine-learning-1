@@ -38,7 +38,7 @@ A good mental model is:
 
 ## 3. Why this notebook matters in the pipeline
 
-`build_all_datasets_and_samples.py` sits between raw audio collections and downstream feature extraction. Its responsibilities are to:
+`1_build_all_datasets_and_samples.py` sits between raw audio collections and downstream feature extraction. Its responsibilities are to:
 
 * discover in-scope audio files;
 * normalize source metadata into a shared schema;

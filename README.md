@@ -65,34 +65,34 @@ Current manifest behavior:
 After the FMA metadata manifest exists, build the MelCNN-MGR unified manifests:
 
 ```bash
-python MelCNN-MGR/preprocessing/build_all_datasets_and_samples.py
+python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py
 ```
 
 Run Stage 1 only to produce the intermediate manifests:
 
 ```bash
-python MelCNN-MGR/preprocessing/build_all_datasets_and_samples.py \
+python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py \
     --mode stage1
 ```
 
 Run Stage 2 only to consume an existing `manifest_all_samples.parquet` and rebuild just the final manifest:
 
 ```bash
-python MelCNN-MGR/preprocessing/build_all_datasets_and_samples.py \
+python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py \
     --mode stage2
 ```
 
 Run both stages explicitly:
 
 ```bash
-python MelCNN-MGR/preprocessing/build_all_datasets_and_samples.py \
+python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py \
     --mode both
 ```
 
 Run with explicit FMA subset and INFO logging:
 
 ```bash
-python MelCNN-MGR/preprocessing/build_all_datasets_and_samples.py \
+python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py \
     --mode both \
     --fma-subset medium \
     --log-level INFO
@@ -101,7 +101,7 @@ python MelCNN-MGR/preprocessing/build_all_datasets_and_samples.py \
 Force an FMA rescan from `tracks.csv` instead of reusing the cached metadata parquet:
 
 ```bash
-python MelCNN-MGR/preprocessing/build_all_datasets_and_samples.py \
+python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py \
     --mode both \
     --fma-subset medium \
     --force-rescan \
@@ -128,7 +128,7 @@ Report and config outputs depend on mode:
 Use custom output locations if needed:
 
 ```bash
-python MelCNN-MGR/preprocessing/build_all_datasets_and_samples.py \
+python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py \
     --mode both \
     --all-datasets-out /tmp/manifest_all_datasets.parquet \
     --all-samples-out /tmp/manifest_all_samples.parquet \
@@ -138,13 +138,13 @@ python MelCNN-MGR/preprocessing/build_all_datasets_and_samples.py \
 For Stage 2-only runs, `--all-samples-out` acts as the input path of the existing Stage 1 sample manifest:
 
 ```bash
-python MelCNN-MGR/preprocessing/build_all_datasets_and_samples.py \
+python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py \
     --mode stage2 \
     --all-samples-out /tmp/manifest_all_samples.parquet \
     --final-samples-out /tmp/manifest_final_samples.parquet
 ```
 
-Further details: [`docs/MelCNN-MGR-build_all_datasets_and_samples.md`](docs/MelCNN-MGR-build_all_datasets_and_samples.md)
+Further details: [`docs/MelCNN-MGR-1_build_all_datasets_and_samples.md`](docs/MelCNN-MGR-1_build_all_datasets_and_samples.md)
 
 ### 4. Refresh derived data before reruns
 

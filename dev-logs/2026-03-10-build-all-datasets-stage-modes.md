@@ -1,4 +1,4 @@
-# Dev Log — 2026-03-10 — Stage Modes for `build_all_datasets_and_samples.py`
+# Dev Log — 2026-03-10 — Stage Modes for `1_build_all_datasets_and_samples.py`
 
 ## Scope
 
@@ -6,13 +6,13 @@ This change formalizes the existing two-stage manifest pipeline into an explicit
 
 Updated artifacts:
 
-1. `MelCNN-MGR/preprocessing/build_all_datasets_and_samples.py`
+1. `MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py`
 2. `README.md`
-3. `docs/MelCNN-MGR-build_all_datasets_and_samples.md`
+3. `docs/MelCNN-MGR-1_build_all_datasets_and_samples.md`
 
 ## Summary
 
-`build_all_datasets_and_samples.py` now supports a `--mode` flag with three values:
+`1_build_all_datasets_and_samples.py` now supports a `--mode` flag with three values:
 
 1. `stage1`
 2. `stage2`
@@ -93,17 +93,17 @@ This makes the manifest workflow operationally cleaner:
 Stage 1 only:
 
 ```bash
-python MelCNN-MGR/preprocessing/build_all_datasets_and_samples.py --mode stage1
+python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py --mode stage1
 ```
 
 Stage 2 only:
 
 ```bash
-python MelCNN-MGR/preprocessing/build_all_datasets_and_samples.py --mode stage2
+python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py --mode stage2
 ```
 
 Both stages:
 
 ```bash
-python MelCNN-MGR/preprocessing/build_all_datasets_and_samples.py --mode both
+python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py --mode both
 ```

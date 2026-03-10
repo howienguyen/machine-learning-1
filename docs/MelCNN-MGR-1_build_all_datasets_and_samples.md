@@ -1,8 +1,8 @@
-# MelCNN-MGR `build_all_datasets_and_samples.py`
+# MelCNN-MGR `1_build_all_datasets_and_samples.py`
 
 ## Purpose
 
-`MelCNN-MGR/preprocessing/build_all_datasets_and_samples.py` is the manifest builder for the MelCNN-MGR data pipeline.
+`MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py` is the manifest builder for the MelCNN-MGR data pipeline.
 
 It creates the three core parquet artifacts used by downstream preprocessing and model training:
 
@@ -494,7 +494,7 @@ This is critical for dataset auditing and rerun reproducibility.
 ## Typical execution example
 
 ```bash
-python MelCNN-MGR/preprocessing/build_all_datasets_and_samples.py \
+python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py \
   --mode both \
   --fma-subset medium \
   --log-level INFO
@@ -503,7 +503,7 @@ python MelCNN-MGR/preprocessing/build_all_datasets_and_samples.py \
 Stage 1 only:
 
 ```bash
-python MelCNN-MGR/preprocessing/build_all_datasets_and_samples.py \
+python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py \
   --mode stage1 \
   --fma-subset medium \
   --log-level INFO
@@ -512,7 +512,7 @@ python MelCNN-MGR/preprocessing/build_all_datasets_and_samples.py \
 Stage 2 only:
 
 ```bash
-python MelCNN-MGR/preprocessing/build_all_datasets_and_samples.py \
+python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py \
   --mode stage2 \
   --all-samples-out MelCNN-MGR/data/processed/manifest_all_samples.parquet \
   --final-samples-out MelCNN-MGR/data/processed/manifest_final_samples.parquet \
@@ -522,7 +522,7 @@ python MelCNN-MGR/preprocessing/build_all_datasets_and_samples.py \
 To force a rebuild from `tracks.csv` instead of using a cached FMA parquet:
 
 ```bash
-python MelCNN-MGR/preprocessing/build_all_datasets_and_samples.py \
+python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py \
   --mode both \
   --fma-subset medium \
   --force-rescan \
@@ -543,7 +543,7 @@ That downstream stage expects the segment-level final manifest and relies on fie
 6. `final_split`
 7. `reason_code`
 
-As a result, `build_all_datasets_and_samples.py` defines the ground truth for which audio segments enter later feature extraction and model training.
+As a result, `1_build_all_datasets_and_samples.py` defines the ground truth for which audio segments enter later feature extraction and model training.
 
 ## Practical summary
 
