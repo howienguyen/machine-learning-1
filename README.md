@@ -60,7 +60,93 @@ Current manifest behavior:
 - Identity columns are included in manifests and split parquets: `sample_id`, `source`
 - The currently excluded top-level label is `International`
 
-### 3. Refresh derived data before reruns
+### 3. Build the unified dataset/sample manifests for training
+
+After the FMA metadata manifest exists, build the MelCNN-MGR unified manifests:
+
+```bash
+python MelCNN-MGR/preprocessing/build_all_datasets_and_samples.py
+```
+
+Run Stage 1 only to produce the intermediate manifests:
+
+```bash
+python MelCNN-MGR/preprocessing/build_all_datasets_and_samples.py \
+    --mode stage1
+```
+
+Run Stage 2 only to consume an existing `manifest_all_samples.parquet` and rebuild just the final manifest:
+
+```bash
+python MelCNN-MGR/preprocessing/build_all_datasets_and_samples.py \
+    --mode stage2
+```
+
+Run both stages explicitly:
+
+```bash
+python MelCNN-MGR/preprocessing/build_all_datasets_and_samples.py \
+    --mode both
+```
+
+Run with explicit FMA subset and INFO logging:
+
+```bash
+python MelCNN-MGR/preprocessing/build_all_datasets_and_samples.py \
+    --mode both \
+    --fma-subset medium \
+    --log-level INFO
+```
+
+Force an FMA rescan from `tracks.csv` instead of reusing the cached metadata parquet:
+
+```bash
+python MelCNN-MGR/preprocessing/build_all_datasets_and_samples.py \
+    --mode both \
+    --fma-subset medium \
+    --force-rescan \
+    --log-level INFO
+```
+
+This script supports three execution modes:
+
+- `--mode stage1`: writes `manifest_all_datasets.parquet` and `manifest_all_samples.parquet`
+- `--mode stage2`: reads the existing Stage 1 sample manifest and writes `manifest_final_samples.parquet`
+- `--mode both`: runs the full pipeline and writes all three parquet outputs
+
+Output files are written under `MelCNN-MGR/data/processed/` by default:
+
+- `manifest_all_datasets.parquet`
+- `manifest_all_samples.parquet`
+- `manifest_final_samples.parquet`
+
+Report and config outputs depend on mode:
+
+- `--mode stage1` and `--mode both`: `manifest_all_datasets.report.txt`, `manifest_all_datasets.config.json`
+- `--mode stage2`: `manifest_final_samples.report.txt`, `manifest_final_samples.config.json`
+
+Use custom output locations if needed:
+
+```bash
+python MelCNN-MGR/preprocessing/build_all_datasets_and_samples.py \
+    --mode both \
+    --all-datasets-out /tmp/manifest_all_datasets.parquet \
+    --all-samples-out /tmp/manifest_all_samples.parquet \
+    --final-samples-out /tmp/manifest_final_samples.parquet
+```
+
+For Stage 2-only runs, `--all-samples-out` acts as the input path of the existing Stage 1 sample manifest:
+
+```bash
+python MelCNN-MGR/preprocessing/build_all_datasets_and_samples.py \
+    --mode stage2 \
+    --all-samples-out /tmp/manifest_all_samples.parquet \
+    --final-samples-out /tmp/manifest_final_samples.parquet
+```
+
+Further details: [`docs/MelCNN-MGR-build_all_datasets_and_samples.md`](docs/MelCNN-MGR-build_all_datasets_and_samples.md)
+
+### 4. Refresh derived data before reruns
 
 Before rerunning preprocessing for `small` and `medium`, remove only derived artifacts.
 Do not delete the raw FMA dataset.
@@ -90,7 +176,7 @@ Why clear `MelCNN-MGR/cache/`:
 - those cache filenames are still keyed by `track_id`
 - once multi-source supplementation is introduced, stale cache entries can collide across sources unless the cache is refreshed
 
-### 4. Collect extra samples for the small dataset
+### 5. Collect extra samples for the small dataset
 
 After rebuilding both manifests, generate the supplementation candidate JSON:
 
@@ -111,7 +197,7 @@ The collector currently:
 
 Configuration lives in `MelCNN-MGR/settings.json` under `small_dataset_supplementation`.
 
-### 5. Load selected extra samples into the small split parquets
+### 6. Load selected extra samples into the small split parquets
 
 After generating `extra_samples_for_small_dataset.json`, run:
 
@@ -147,7 +233,7 @@ python MelCNN-MGR/preprocessing/load_extra_samples_for_small_dataset_splits.py \
 
 By default the script overwrites the live `train_small.parquet`, `val_small.parquet`, and `test_small.parquet` in `MelCNN-MGR/data/processed/`.
 
-### 6. Supplementation status
+### 7. Supplementation status
 
 `extra_samples_for_small_dataset.json` remains the candidate-selection artifact, while
 `load_extra_samples_for_small_dataset_splits.py` is the step that materializes the
@@ -163,7 +249,7 @@ For provenance-aware EDA of this workflow, use:
 - `MelCNN-MGR/notebooks/Data-Understanding-Train-Val-Test-Genre-Distribution.ipynb` for the generic split-shape sanity check
 - `MelCNN-MGR/notebooks/Data-Understanding-Train-Val-Test-Genre-Distribution-Supplementation-Aware.ipynb` for official-vs-current-vs-projected small-split comparisons
 
-### 7. Python environment
+### 8. Python environment
 
 ```bash
 # intel-extension-for-tensorflow (optional — for Intel XPU acceleration)

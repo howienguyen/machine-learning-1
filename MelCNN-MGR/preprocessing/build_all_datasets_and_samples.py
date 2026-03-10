@@ -6,6 +6,16 @@ Outputs written to MelCNN-MGR/data/processed by default:
     manifest_all_samples.parquet   one row per fixed-length sample segment
     manifest_final_samples.parquet selected sample segments with final split labels
 
+Logical pipeline stages:
+    Stage 1: generate manifest_all_datasets.parquet and manifest_all_samples.parquet
+             as auditable intermediate artifacts
+    Stage 2: generate manifest_final_samples.parquet from the Stage 1 sample rows
+             for downstream model-training consumers
+
+The CLI can execute Stage 1 only, Stage 2 only, or both stages in one run.
+The parquet outputs define a natural boundary between intermediate manifest
+generation and final training-manifest selection.
+
 The script uses settings.data_sampling_settings in MelCNN-MGR/settings.json:
     target_genres
     sample_length_sec
@@ -117,6 +127,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Build all-datasets and all-samples manifests.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--mode",
+        default="both",
+        choices=["stage1", "stage2", "both"],
+        help="Execution mode: Stage 1 only, Stage 2 only, or both stages.",
     )
     parser.add_argument(
         "--settings",
@@ -540,16 +556,11 @@ def build_fma_candidates_from_scratch(
     # Map to unified schema
     source_label = f"fma-{subset}"
     df["source"] = source_label
-    df["source_type"] = "fma"
-    df["sample_id"] = [f"fma:{int(tid)}" for tid in df.index]
+    df["artifact_id"] = [f"fma:{int(tid)}" for tid in df.index]
     df["source_track_id"] = df.index.astype(str)
     df["track_id"] = df.index.astype("Int64")
-    df["relative_path"] = df["filepath"].map(
-        lambda value: _relative_to_workspace(Path(str(value)))
-    )
-    df["file_ext"] = ".mp3"
     logging.info("[FMA-rescan] Probing actual audio durations ...")
-    df["audio_duration_s"], df["duration_s"], df["duration_source"] = _probe_durations_for_frame(df, "[FMA-rescan]")
+    df["actual_duration_s"], df["duration_s"], df["duration_source"] = _probe_durations_for_frame(df, "[FMA-rescan]")
     df["manifest_origin"] = f"from_scratch:{metadata_root}"
     df["filesize_bytes"] = pd.to_numeric(
         df["filesize_bytes"], errors="coerce"
@@ -591,10 +602,9 @@ def build_fma_candidates_from_scratch(
         logging.info("[FMA-rescan] Audio/track counts by genre:\n%s", genre_counts.to_string())
 
     keep_columns = [
-        "source", "source_type", "sample_id", "source_track_id",
-        "track_id", "genre_top", "subset", "split", "artist_id", "filepath",
-        "relative_path", "file_ext", "audio_exists", "filesize_bytes",
-        "audio_duration_s", "duration_s", "duration_source", "reason_code", "sampling_eligible",
+        "source", "artifact_id", "source_track_id", "track_id", "genre_top",
+        "filepath", "audio_exists", "filesize_bytes", "actual_duration_s", "duration_s",
+        "reason_code", "sampling_eligible",
         "sampling_num_segments", "sampling_exclusion_reason", "manifest_origin",
     ]
     return df[keep_columns].reset_index(drop=True)
@@ -697,21 +707,20 @@ def assign_final_splits(
     """
     samples = all_samples.copy()
     if samples.empty:
-        samples["final_split"] = pd.Series(dtype="string")
-        samples["selected_for_final_manifest"] = pd.Series(dtype="bool")
         empty_summary = pd.DataFrame(
             columns=["genre_top", "training", "validation", "test", "selected_total", "target_total"]
         )
         return samples, samples.iloc[0:0].copy(), empty_summary
 
-    samples["final_split"] = pd.Series([None] * len(samples), dtype="object")
-    samples["selected_for_final_manifest"] = False
-    samples["group_sample_id"] = samples["sample_id"].map(_segment_group_id)
+    working_samples = samples.copy()
+    working_samples["final_split"] = pd.Series([None] * len(working_samples), dtype="object")
+    working_samples["selected_for_final_manifest"] = False
+    working_samples["group_sample_id"] = working_samples["sample_id"].map(_segment_group_id)
     summary_rows: list[dict[str, object]] = []
 
-    for genre_index, genre in enumerate(sorted(samples["genre_top"].dropna().unique())):
-        genre_mask = samples["genre_top"] == genre
-        genre_df = samples.loc[genre_mask].copy()
+    for genre_index, genre in enumerate(sorted(working_samples["genre_top"].dropna().unique())):
+        genre_mask = working_samples["genre_top"] == genre
+        genre_df = working_samples.loc[genre_mask].copy()
         target_total = min(number_of_samples_expected_each_genre, len(genre_df))
         targets = _compute_final_split_targets(target_total, train_ratio_each_genre)
         remaining = dict(targets)
@@ -734,9 +743,9 @@ def assign_final_splits(
                 _FINAL_SPLIT_ORDER,
                 key=lambda split_name: (remaining[split_name], -_FINAL_SPLIT_ORDER.index(split_name)),
             )
-            group_mask = genre_mask & (samples["group_sample_id"] == group.group_sample_id)
-            samples.loc[group_mask, "final_split"] = split_choice
-            samples.loc[group_mask, "selected_for_final_manifest"] = True
+            group_mask = genre_mask & (working_samples["group_sample_id"] == group.group_sample_id)
+            working_samples.loc[group_mask, "final_split"] = split_choice
+            working_samples.loc[group_mask, "selected_for_final_manifest"] = True
 
             selected_total += int(group.sample_count)
             selected_counts[split_choice] += int(group.sample_count)
@@ -753,18 +762,17 @@ def assign_final_splits(
             }
         )
 
-    final_samples = samples[samples["selected_for_final_manifest"] == True].copy()
+    final_samples = working_samples[working_samples["selected_for_final_manifest"] == True].copy()
     final_samples = final_samples.sort_values(
         ["genre_top", "final_split", "group_sample_id", "segment_index"],
         kind="stable",
     ).reset_index(drop=True)
     final_columns = [
         "sample_id", "source", "genre_top", "filepath", "track_id",
-        "split", "sample_length_sec", "segment_index", "segment_start_sec",
-        "segment_end_sec", "audio_duration_s", "reason_code",
-        "final_split", "selected_for_final_manifest",
+        "sample_length_sec", "segment_index", "segment_start_sec",
+        "segment_end_sec", "total_segments_from_audio", "duration_s", "actual_duration_s", "reason_code",
+        "final_split",
     ]
-    samples = samples.drop(columns=["group_sample_id"])
     final_samples = final_samples[final_columns]
     split_summary = pd.DataFrame(summary_rows)
     return samples, final_samples, split_summary
@@ -805,14 +813,11 @@ def load_medium_candidates(
     logging.info("[FMA-medium] Computing derived columns ...")
     source_label = f"fma-{subset}"
     df["source"] = source_label
-    df["source_type"] = "fma"
-    df["sample_id"] = [f"fma:{int(track_id)}" for track_id in df.index.astype(int)]
+    df["artifact_id"] = [f"fma:{int(track_id)}" for track_id in df.index.astype(int)]
     df["source_track_id"] = df.index.astype(str)
     df["track_id"] = df.index.astype("Int64")
-    df["relative_path"] = df["filepath"].map(lambda value: _relative_to_workspace(Path(str(value))))
-    df["file_ext"] = df["filepath"].map(lambda value: Path(str(value)).suffix.lower())
     logging.info("[FMA-medium] Probing actual audio durations ...")
-    df["audio_duration_s"], df["duration_s"], df["duration_source"] = _probe_durations_for_frame(df, "[FMA-medium]")
+    df["actual_duration_s"], df["duration_s"], df["duration_source"] = _probe_durations_for_frame(df, "[FMA-medium]")
     df["manifest_origin"] = str(path)
     df["filesize_bytes"] = pd.to_numeric(df["filesize_bytes"], errors="coerce").astype("Int64")
     df["reason_code"] = df.apply(_assign_fma_reason, axis=1, min_duration_s=min_duration_s)
@@ -836,9 +841,8 @@ def load_medium_candidates(
     logging.info("[FMA-medium] Done: %d rows (%d eligible) in %.1fs", len(df), n_eligible, time.time() - t0)
 
     keep_columns = [
-        "source", "source_type", "sample_id", "source_track_id", "track_id",
-        "genre_top", "subset", "split", "artist_id", "filepath", "relative_path",
-        "file_ext", "audio_exists", "filesize_bytes", "audio_duration_s", "duration_s", "duration_source",
+        "source", "artifact_id", "source_track_id", "track_id",
+        "genre_top", "filepath", "audio_exists", "filesize_bytes", "actual_duration_s", "duration_s",
         "reason_code", "sampling_eligible", "sampling_num_segments",
         "sampling_exclusion_reason", "manifest_origin",
     ]
@@ -897,8 +901,8 @@ def collect_additional_candidates(
                 source_dir.name, genre_dir.name, mapped_genres, len(audio_files),
             )
             for i, audio_path in enumerate(audio_files):
-                audio_duration_s, duration_source = probe_audio_duration(audio_path)
-                duration_s = _normalize_audio_duration(audio_duration_s)
+                actual_duration_s, duration_source = probe_audio_duration(audio_path)
+                duration_s = _normalize_audio_duration(actual_duration_s)
                 if duration_s is None:
                     reason_code = "AUDIO_READ_FAILED"
                 elif duration_s < min_duration_s:
@@ -922,26 +926,19 @@ def collect_additional_candidates(
                     )
 
                 for genre in mapped_genres:
-                    base_sample_id = f"{source_dir.name}:{genre}:{source_audio_id}"
+                    artifact_id = f"{source_dir.name}:{genre}:{source_audio_id}"
                     rows.append(
                         {
                             "source": source_dir.name,
-                            "source_type": "additional_dataset",
-                            "sample_id": base_sample_id,
+                            "artifact_id": artifact_id,
                             "source_track_id": None,
                             "track_id": None,
                             "genre_top": genre,
-                            "subset": None,
-                            "split": None,
-                            "artist_id": None,
                             "filepath": str(audio_path),
-                            "relative_path": relative_path,
-                            "file_ext": audio_path.suffix.lower(),
                             "audio_exists": True,
                             "filesize_bytes": _safe_file_size(audio_path),
-                            "audio_duration_s": audio_duration_s,
+                            "actual_duration_s": actual_duration_s,
                             "duration_s": duration_s,
-                            "duration_source": duration_source or "unknown",
                             "reason_code": reason_code,
                             "sampling_eligible": sampling_eligible,
                             "sampling_num_segments": sampling_num_segments,
@@ -960,7 +957,6 @@ def collect_additional_candidates(
 
     df = pd.DataFrame(rows)
     df["track_id"] = pd.Series(df["track_id"], dtype="Int64")
-    df["artist_id"] = pd.Series(df["artist_id"], dtype="Int64")
     df["filesize_bytes"] = pd.Series(df["filesize_bytes"], dtype="Int64")
     df["sampling_num_segments"] = pd.Series(df["sampling_num_segments"], dtype="Int64")
     return df
@@ -970,9 +966,8 @@ def combine_dataset_manifest(*frames: pd.DataFrame) -> pd.DataFrame:
     logging.info("[Combine] Merging %d frame(s) ...", sum(1 for f in frames if f is not None and not f.empty))
     non_empty = [frame for frame in frames if frame is not None and not frame.empty]
     columns = [
-        "source", "source_type", "sample_id", "source_track_id", "track_id",
-        "genre_top", "subset", "split", "artist_id", "filepath", "relative_path",
-        "file_ext", "audio_exists", "filesize_bytes", "audio_duration_s", "duration_s", "duration_source",
+        "source", "artifact_id", "source_track_id", "track_id",
+        "genre_top", "filepath", "audio_exists", "filesize_bytes", "actual_duration_s", "duration_s",
         "reason_code", "sampling_eligible", "sampling_num_segments",
         "sampling_exclusion_reason", "manifest_origin",
     ]
@@ -981,11 +976,10 @@ def combine_dataset_manifest(*frames: pd.DataFrame) -> pd.DataFrame:
 
     combined = pd.concat(non_empty, axis=0, ignore_index=True)
     before_dedup = len(combined)
-    combined = combined[columns].drop_duplicates(subset=["sample_id"], keep="first")
+    combined = combined[columns].drop_duplicates(subset=["artifact_id"], keep="first")
     logging.info("[Combine] %d rows after concat, %d after dedup", before_dedup, len(combined))
-    combined = combined.sort_values(["genre_top", "source", "sample_id"], kind="stable").reset_index(drop=True)
+    combined = combined.sort_values(["genre_top", "source", "artifact_id"], kind="stable").reset_index(drop=True)
     combined["track_id"] = pd.Series(combined["track_id"], dtype="Int64")
-    combined["artist_id"] = pd.Series(combined["artist_id"], dtype="Int64")
     combined["filesize_bytes"] = pd.Series(combined["filesize_bytes"], dtype="Int64")
     combined["sampling_num_segments"] = pd.Series(combined["sampling_num_segments"], dtype="Int64")
     return combined
@@ -996,22 +990,20 @@ def build_samples_manifest(all_datasets: pd.DataFrame, sample_length_sec: float)
     t0 = time.time()
     if all_datasets.empty:
         return pd.DataFrame(columns=[
-            "sample_id", "source", "source_type", "genre_top", "filepath",
-            "relative_path", "track_id", "subset", "split", "artist_id", "sample_length_sec",
+            "sample_id", "source", "genre_top", "filepath", "track_id", "sample_length_sec",
             "segment_index", "segment_start_sec", "segment_end_sec", "total_segments_from_audio",
-            "audio_duration_s", "file_ext", "reason_code", "final_split", "selected_for_final_manifest",
+            "duration_s", "actual_duration_s", "reason_code",
         ])
 
     rows: list[dict[str, object]] = []
     eligible = all_datasets[
         (all_datasets["reason_code"] == "OK")
-        & (all_datasets["sampling_eligible"] == True)
-        & (all_datasets["sampling_num_segments"].notna())
+        & (all_datasets["duration_s"].notna())
     ]
     n_eligible = len(eligible)
     logging.info("[Samples] %d eligible audio files to expand", n_eligible)
     for idx, record in enumerate(eligible.itertuples(index=False)):
-        total_segments = int(record.sampling_num_segments)
+        total_segments = _compute_segment_count(float(record.duration_s), sample_length_sec)
         if total_segments <= 0:
             continue
         for segment_index in range(total_segments):
@@ -1019,26 +1011,19 @@ def build_samples_manifest(all_datasets: pd.DataFrame, sample_length_sec: float)
             end_sec = start_sec + sample_length_sec
             rows.append(
                 {
-                    "sample_id": f"{record.sample_id}:seg{segment_index:04d}",
+                    "sample_id": f"{record.artifact_id}:seg{segment_index:04d}",
                     "source": record.source,
-                    "source_type": record.source_type,
                     "genre_top": record.genre_top,
                     "filepath": record.filepath,
-                    "relative_path": record.relative_path,
                     "track_id": record.track_id,
-                    "subset": record.subset,
-                    "split": record.split,
-                    "artist_id": record.artist_id,
                     "sample_length_sec": sample_length_sec,
                     "segment_index": segment_index,
                     "segment_start_sec": float(start_sec),
                     "segment_end_sec": float(end_sec),
                     "total_segments_from_audio": total_segments,
-                    "audio_duration_s": record.audio_duration_s,
-                    "file_ext": record.file_ext,
+                    "duration_s": record.duration_s,
+                    "actual_duration_s": record.actual_duration_s,
                     "reason_code": record.reason_code,
-                    "final_split": None,
-                    "selected_for_final_manifest": False,
                 }
             )
 
@@ -1052,7 +1037,6 @@ def build_samples_manifest(all_datasets: pd.DataFrame, sample_length_sec: float)
 
     samples = samples.sort_values(["genre_top", "source", "sample_id", "segment_index"], kind="stable").reset_index(drop=True)
     samples["track_id"] = pd.Series(samples["track_id"], dtype="Int64")
-    samples["artist_id"] = pd.Series(samples["artist_id"], dtype="Int64")
     samples["total_segments_from_audio"] = pd.Series(samples["total_segments_from_audio"], dtype="Int64")
     return samples
 
@@ -1060,6 +1044,31 @@ def build_samples_manifest(all_datasets: pd.DataFrame, sample_length_sec: float)
 def write_parquet(path: Path, frame: pd.DataFrame) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     frame.to_parquet(path, engine="pyarrow", index=False)
+
+
+def load_stage1_samples_manifest(path: Path) -> pd.DataFrame:
+    """Load the Stage 1 sample manifest used as input for Stage 2."""
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Stage 2 requires an existing Stage 1 sample manifest: {path}"
+        )
+
+    samples = pd.read_parquet(path)
+    required_columns = {
+        "sample_id", "source", "genre_top", "filepath", "track_id",
+        "sample_length_sec", "segment_index", "segment_start_sec", "segment_end_sec",
+        "total_segments_from_audio", "duration_s", "actual_duration_s", "reason_code",
+    }
+    missing = sorted(required_columns.difference(samples.columns))
+    if missing:
+        raise ValueError(
+            f"Missing required columns in Stage 1 sample manifest {path}: {', '.join(missing)}"
+        )
+
+    samples = samples.copy()
+    samples["track_id"] = pd.Series(samples["track_id"], dtype="Int64")
+    samples["total_segments_from_audio"] = pd.Series(samples["total_segments_from_audio"], dtype="Int64")
+    return samples
 
 
 def summarize_skipped_audio_paths(all_datasets: pd.DataFrame) -> pd.DataFrame:
@@ -1123,12 +1132,13 @@ def log_skipped_audio_paths(all_datasets: pd.DataFrame) -> int:
 
 
 def log_summary(
-    all_datasets: pd.DataFrame,
-    all_samples: pd.DataFrame,
+    all_datasets: pd.DataFrame | None = None,
+    all_samples: pd.DataFrame | None = None,
     final_samples: pd.DataFrame | None = None,
 ) -> None:
-    logging.info("All-datasets rows: %d", len(all_datasets))
-    if not all_datasets.empty:
+    if all_datasets is not None:
+        logging.info("All-datasets rows: %d", len(all_datasets))
+    if all_datasets is not None and not all_datasets.empty:
         logging.info(
             "Eligible dataset rows: %d | Ineligible dataset rows: %d",
             int(all_datasets["sampling_eligible"].sum()),
@@ -1137,8 +1147,9 @@ def log_summary(
         logging.info("Dataset rows by source:\n%s", all_datasets.groupby("source").size().to_string())
         logging.info("Dataset rows by genre:\n%s", all_datasets.groupby("genre_top").size().sort_values(ascending=False).to_string())
 
-    logging.info("All-samples rows: %d", len(all_samples))
-    if not all_samples.empty:
+    if all_samples is not None:
+        logging.info("All-samples rows: %d", len(all_samples))
+    if all_samples is not None and not all_samples.empty:
         logging.info("Sample rows by source:\n%s", all_samples.groupby("source").size().to_string())
         logging.info("Sample rows by genre:\n%s", all_samples.groupby("genre_top").size().sort_values(ascending=False).to_string())
     if final_samples is not None:
@@ -1147,8 +1158,9 @@ def log_summary(
             logging.info("Final sample rows by split:\n%s", final_samples.groupby("final_split").size().to_string())
             logging.info("Final sample rows by genre:\n%s", final_samples.groupby("genre_top").size().sort_values(ascending=False).to_string())
 
-    skipped_count = log_skipped_audio_paths(all_datasets)
-    logging.info("Skipped audio file count: %d", skipped_count)
+    if all_datasets is not None:
+        skipped_count = log_skipped_audio_paths(all_datasets)
+        logging.info("Skipped audio file count: %d", skipped_count)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1156,10 +1168,10 @@ def log_summary(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def write_build_report(
-    all_datasets: pd.DataFrame,
-    all_samples: pd.DataFrame,
-    final_samples: pd.DataFrame,
-    split_summary: pd.DataFrame,
+    all_datasets: pd.DataFrame | None,
+    all_samples: pd.DataFrame | None,
+    final_samples: pd.DataFrame | None,
+    split_summary: pd.DataFrame | None,
     path: Path,
     config: dict,
 ) -> None:
@@ -1177,10 +1189,10 @@ def write_build_report(
     for key, val in config.items():
         lines.append(f"  {key}: {val}")
 
-    # Dataset summary
-    lines += ["", "── Dataset manifest ────────────────────────────────────"]
-    lines.append(f"  Total rows              : {len(all_datasets):>7,}")
-    if not all_datasets.empty:
+    if all_datasets is not None:
+        lines += ["", "── Dataset manifest ────────────────────────────────────"]
+        lines.append(f"  Total rows              : {len(all_datasets):>7,}")
+    if all_datasets is not None and not all_datasets.empty:
         n_eligible = int(all_datasets["sampling_eligible"].sum())
         skipped_count = len(summarize_skipped_audio_paths(all_datasets))
         lines.append(f"  Eligible for sampling   : {n_eligible:>7,}")
@@ -1199,33 +1211,10 @@ def write_build_report(
         for code, cnt in all_datasets["reason_code"].value_counts().items():
             lines.append(f"    {code:<28} {cnt:>7,}")
 
-        if "split" in all_datasets.columns:
-            lines += ["", "  Split distribution (FMA rows with split):"]
-            split_rows = all_datasets[all_datasets["split"].notna()]
-            for split_name, cnt in split_rows["split"].value_counts().items():
-                lines.append(f"    {split_name:<14} {cnt:>7,}")
-
-        # Artist leakage check (FMA rows only)
-        fma_ok = all_datasets[
-            (all_datasets["source_type"] == "fma")
-            & (all_datasets["reason_code"] == "OK")
-            & (all_datasets["artist_id"].notna())
-        ]
-        if not fma_ok.empty and "split" in fma_ok.columns:
-            lines += ["", "  Artist leakage check (FMA OK rows):"]
-            splits = {
-                s: set(fma_ok[fma_ok["split"] == s]["artist_id"])
-                for s in ("training", "validation", "test")
-            }
-            for a, b in [("training", "validation"), ("training", "test"), ("validation", "test")]:
-                overlap = splits.get(a, set()) & splits.get(b, set())
-                status = "OK \u2014 no overlap" if not overlap else f"!! {len(overlap)} shared artists"
-                lines.append(f"    {a} \u2229 {b}: {len(overlap)} ({status})")
-
-    # Samples summary
-    lines += ["", "── Samples manifest ────────────────────────────────────"]
-    lines.append(f"  Total sample segments   : {len(all_samples):>7,}")
-    if not all_samples.empty:
+    if all_samples is not None:
+        lines += ["", "── Samples manifest ────────────────────────────────────"]
+        lines.append(f"  Total sample segments   : {len(all_samples):>7,}")
+    if all_samples is not None and not all_samples.empty:
         lines += ["", "  Segments by source:"]
         for src, cnt in all_samples.groupby("source").size().items():
             lines.append(f"    {src:<28} {cnt:>7,}")
@@ -1234,9 +1223,10 @@ def write_build_report(
         for genre, cnt in all_samples.groupby("genre_top").size().sort_values(ascending=False).items():
             lines.append(f"    {genre:<28} {cnt:>7,}")
 
-    lines += ["", "── Final samples manifest ──────────────────────────────"]
-    lines.append(f"  Total final segments    : {len(final_samples):>7,}")
-    if not final_samples.empty:
+    if final_samples is not None:
+        lines += ["", "── Final samples manifest ──────────────────────────────"]
+        lines.append(f"  Total final segments    : {len(final_samples):>7,}")
+    if final_samples is not None and not final_samples.empty:
         lines += ["", "  Final segments by split:"]
         for split_name, cnt in final_samples.groupby("final_split").size().items():
             lines.append(f"    {split_name:<28} {cnt:>7,}")
@@ -1245,7 +1235,7 @@ def write_build_report(
         for genre, cnt in final_samples.groupby("genre_top").size().sort_values(ascending=False).items():
             lines.append(f"    {genre:<28} {cnt:>7,}")
 
-        if not split_summary.empty:
+        if split_summary is not None and not split_summary.empty:
             lines += ["", "  Final per-genre split counts:"]
             lines.append(f"    {'Genre':<24} {'train':>7} {'val':>7} {'test':>7} {'total':>7} {'target':>7}")
             for row in split_summary.itertuples(index=False):
@@ -1299,6 +1289,7 @@ def main(argv: list[str] | None = None) -> int:
     final_samples_out = Path(args.final_samples_out)
 
     config = {
+        "mode": args.mode,
         "target_genres": target_genres,
         "sample_length_sec": sample_length_sec,
         "min_duration_delta": min_duration_delta,
@@ -1330,70 +1321,81 @@ def main(argv: list[str] | None = None) -> int:
     )
     logging.info("FMA subset: %s | min_duration: %.3fs | force_rescan: %s",
                  args.fma_subset, min_duration_s, args.force_rescan)
+    logging.info("Execution mode: %s", args.mode)
     logging.info("=" * 60)
 
     t_start = time.time()
 
-    # Step 1: FMA candidates (smart: parquet if available, else from-scratch)
-    logging.info("Step 1/5: Building FMA candidates ...")
-    fma_df = build_fma_candidates(
-        medium_manifest_path=medium_manifest_path,
-        fma_metadata_root=fma_metadata_root,
-        fma_audio_root=fma_audio_root,
-        fma_subset=args.fma_subset,
-        target_genres=target_genres,
-        sample_length_sec=sample_length_sec,
-        min_duration_s=min_duration_s,
-        force_rescan=args.force_rescan,
-    )
-    logging.info("Step 1/5 done (%.1fs)\n", time.time() - t_start)
+    all_datasets: pd.DataFrame | None = None
+    all_samples: pd.DataFrame | None = None
+    final_samples: pd.DataFrame | None = None
+    split_summary: pd.DataFrame | None = None
 
-    # Step 2: Additional dataset candidates
-    t1 = time.time()
-    logging.info("Step 2/5: Collecting additional dataset candidates ...")
-    additional_df = collect_additional_candidates(
-        additional_root, target_genres, sample_length_sec, min_duration_s,
-    )
-    logging.info("Step 2/5 done (%.1fs)\n", time.time() - t1)
+    if args.mode in {"stage1", "both"}:
+        logging.info("Step 1/5: Building FMA candidates ...")
+        fma_df = build_fma_candidates(
+            medium_manifest_path=medium_manifest_path,
+            fma_metadata_root=fma_metadata_root,
+            fma_audio_root=fma_audio_root,
+            fma_subset=args.fma_subset,
+            target_genres=target_genres,
+            sample_length_sec=sample_length_sec,
+            min_duration_s=min_duration_s,
+            force_rescan=args.force_rescan,
+        )
+        logging.info("Step 1/5 done (%.1fs)\n", time.time() - t_start)
 
-    # Step 3: Combine
-    t2 = time.time()
-    logging.info("Step 3/5: Combining dataset manifest ...")
-    all_datasets = combine_dataset_manifest(fma_df, additional_df)
-    logging.info("Step 3/5 done (%.1fs)\n", time.time() - t2)
+        t1 = time.time()
+        logging.info("Step 2/5: Collecting additional dataset candidates ...")
+        additional_df = collect_additional_candidates(
+            additional_root, target_genres, sample_length_sec, min_duration_s,
+        )
+        logging.info("Step 2/5 done (%.1fs)\n", time.time() - t1)
 
-    # Step 4: Build sample segments
-    t3 = time.time()
-    logging.info("Step 4/5: Building sample segments manifest ...")
-    all_samples = build_samples_manifest(all_datasets, sample_length_sec)
-    logging.info("Step 4/5 done (%.1fs)\n", time.time() - t3)
+        t2 = time.time()
+        logging.info("Step 3/5: Combining dataset manifest ...")
+        all_datasets = combine_dataset_manifest(fma_df, additional_df)
+        logging.info("Step 3/5 done (%.1fs)\n", time.time() - t2)
 
-    t4 = time.time()
-    logging.info("Step 5/5: Assigning final train/validation/test splits ...")
-    all_samples, final_samples, split_summary = assign_final_splits(
-        all_samples,
-        number_of_samples_expected_each_genre,
-        train_ratio_each_genre,
-        args.split_seed,
-    )
-    logging.info("Step 5/5 done (%.1fs)\n", time.time() - t4)
+        t3 = time.time()
+        logging.info("Step 4/5: Building sample segments manifest ...")
+        all_samples = build_samples_manifest(all_datasets, sample_length_sec)
+        logging.info("Step 4/5 done (%.1fs)\n", time.time() - t3)
 
-    # Write outputs
-    write_parquet(all_datasets_out, all_datasets)
-    write_parquet(all_samples_out, all_samples)
-    write_parquet(final_samples_out, final_samples)
+        write_parquet(all_datasets_out, all_datasets)
+        write_parquet(all_samples_out, all_samples)
+
+    if args.mode == "stage2":
+        logging.info("Stage 2 input: loading existing Stage 1 sample manifest from %s", all_samples_out)
+        all_samples = load_stage1_samples_manifest(all_samples_out)
+
+    if args.mode in {"stage2", "both"}:
+        t4 = time.time()
+        logging.info("Step 5/5: Assigning final train/validation/test splits ...")
+        all_samples, final_samples, split_summary = assign_final_splits(
+            all_samples,
+            number_of_samples_expected_each_genre,
+            train_ratio_each_genre,
+            args.split_seed,
+        )
+        logging.info("Step 5/5 done (%.1fs)\n", time.time() - t4)
+        write_parquet(final_samples_out, final_samples)
+
     log_summary(all_datasets, all_samples, final_samples)
 
-    # Write report + config snapshot alongside the datasets parquet
-    report_path = all_datasets_out.with_suffix(".report.txt")
-    config_path = all_datasets_out.with_suffix(".config.json")
+    report_base = all_datasets_out if args.mode in {"stage1", "both"} else final_samples_out
+    report_path = report_base.with_suffix(".report.txt")
+    config_path = report_base.with_suffix(".config.json")
     write_build_report(all_datasets, all_samples, final_samples, split_summary, report_path, config)
     write_config_snapshot(config, config_path)
 
     logging.info("=" * 60)
-    logging.info("Wrote %s (%d rows)", all_datasets_out, len(all_datasets))
-    logging.info("Wrote %s (%d rows)", all_samples_out, len(all_samples))
-    logging.info("Wrote %s (%d rows)", final_samples_out, len(final_samples))
+    if all_datasets is not None:
+        logging.info("Wrote %s (%d rows)", all_datasets_out, len(all_datasets))
+    if all_samples is not None and args.mode in {"stage1", "both"}:
+        logging.info("Wrote %s (%d rows)", all_samples_out, len(all_samples))
+    if final_samples is not None:
+        logging.info("Wrote %s (%d rows)", final_samples_out, len(final_samples))
     logging.info("Total time: %.1fs", time.time() - t_start)
     return 0
 
