@@ -1,3 +1,5 @@
+The plan mentioned here is no longer valid - so do not use this document
+
 # Development Guidelines: Dataset Supplementation After Manifest Build for `baseline_logmel_cnn_v21.py`
 
 Mon Mar  9 2026

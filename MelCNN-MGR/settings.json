@@ -1,5 +1,5 @@
 {
-	"small_dataset_supplementation": {
+	"data_sampling_settings": {
 		"target_genres": [
 			"Hip-Hop",
 			"Pop",
@@ -11,7 +11,11 @@
 			"Country",
 			"Blues"
 		],
-		"n_extra_expected": 300,
-        "train_n_val_test_split_ratio": 0.8
+		"number_of_samples_expected_each_genre": 1300,
+		"additional_samples_rate_expected_each_genre": 0.2,
+        "train_n_val_test_split_ratio_each_genre": 0.8,
+		"sample_length_sec": 10,
+		"min_duration_delta": 0.001
 	}
 }
+

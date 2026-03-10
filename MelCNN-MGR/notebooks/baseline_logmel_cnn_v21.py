@@ -108,7 +108,7 @@ MODELS_BASE_DIR = MELCNN_DIR / "models"
 RUN_DIR         = None
 
 # -- Subset --------------------------------------------------------------------
-SUBSET        = "medium"   # "tiny" | "small" | "medium" | "large"
+SUBSET        = "small"   # "tiny" | "small" | "medium" | "large"
 CLEAR_CACHE   = False       # set to True to force re-extraction of log-mel features (useful when changing CLIP_DURATION or N_MELS)
 
 # -- Audio backend -------------------------------------------------------------
@@ -127,11 +127,11 @@ SILENCE_PEAK  = 1e-4
 SILENCE_STD   = 1e-5
 
 # -- Clip duration -------------------------------------------------------------
-CLIP_DURATION = 15.0   # seconds — random crop for train, center-crop / center-pad otherwise
+CLIP_DURATION = 10.0   # seconds — random crop for train, center-crop / center-pad otherwise
 
 # -- Cache layout (per-track, separate from v20 cache) -------------------------
 LOGMEL_CACHE_SHARED = True
-LOGMEL_CACHE_DIR = CACHE_DIR / "logmel_v21_15s" / ("shared" if LOGMEL_CACHE_SHARED else SUBSET)
+LOGMEL_CACHE_DIR = CACHE_DIR / "logmel_v21_10s" / ("shared" if LOGMEL_CACHE_SHARED else SUBSET)
 
 # -- Training hyperparameters --------------------------------------------------
 EPOCHS        = 99
