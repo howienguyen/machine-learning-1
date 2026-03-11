@@ -10,6 +10,39 @@ A `metadata_manifest.parquet` solves this by becoming the **single source of tru
 
 ---
 
+## Current production-like path
+
+The project now has a canonical production-like path that extends beyond the original FMA-only metadata-manifest framing.
+
+### Upstream additional-data preparation
+
+```text
+download_by_genre_limits.py
+    -> extract_mtg_processed_samples.py
+```
+
+This prepares MTG/Jamendo-derived audio under `additional_datasets/data` so it can be scanned later as part of the shared multi-source dataset.
+
+### Main MelCNN-MGR path
+
+```text
+data sources: FMA + additional_datasets
+    -> MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py
+    -> MelCNN-MGR/preprocessing/2_build_log_mel_dataset.py
+    -> MelCNN-MGR/notebooks/MelCNN_MGR_Manifest_LogMel_EDA.ipynb
+    -> MelCNN-MGR/notebooks/logmel_cnn_v1.py
+```
+
+This means the current default workflow is:
+
+1. multi-source at discovery time
+2. manifest-centric at dataset-contract time
+3. prebuilt-logmel-centric at feature and training time
+
+The rest of this document still explains the underlying manifest philosophy, but the operational default for the current project should be read in the context of that fuller chain.
+
+---
+
 ### Core design principle
 
 Treat `track_id` as the primary key. Everything else is derived and validated against it. The metadata manifest should be *deterministic* (same inputs + same rules ⇒ same output) and *auditable* (you can explain every drop).

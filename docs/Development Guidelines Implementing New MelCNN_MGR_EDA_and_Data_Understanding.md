@@ -1,16 +1,37 @@
 Tue Mar 10 08:57:59 UTC 2026
 New version
 
-# Development Guidelines: Implementing `MelCNN_MGR_EDA_and_Data_Understanding.ipynb`
+# Development Guidelines: Implementing the Manifest/Log-Mel EDA Notebook
 
 ## 1. Purpose of this document
 
-This document explains how to design and implement the notebook `MelCNN_MGR_EDA_and_Data_Understanding.ipynb` for the MelCNN-MGR pipeline. It serves two roles at the same time:
+This document explains how to design and implement the manifest-centric EDA notebook for the MelCNN-MGR pipeline.
+
+The current primary notebook is:
+
+`MelCNN-MGR/notebooks/MelCNN_MGR_Manifest_LogMel_EDA.ipynb`
+
+The older `MelCNN_MGR_EDA_and_Data_Understanding.ipynb` can still serve as reference material, but it is no longer the best name or framing for the current production-like path.
+
+This document serves two roles at the same time:
 
 1. a **development guide** for building the notebook cleanly and correctly;
 2. a **tutorial** for understanding the dataset manifests, sampling logic, duration handling, and final split behavior.
 
 The notebook is not meant to train a model. Its job is to help you understand the dataset before feature extraction and before CNN training.
+
+It belongs in the current production-like chain here:
+
+```text
+download_by_genre_limits.py
+	-> extract_mtg_processed_samples.py
+
+data sources: FMA + additional_datasets
+	-> 1_build_all_datasets_and_samples.py
+	-> 2_build_log_mel_dataset.py
+	-> MelCNN_MGR_Manifest_LogMel_EDA.ipynb
+	-> logmel_cnn_v1.py
+```
 
 ---
 
@@ -34,6 +55,10 @@ A good mental model is:
 
 **raw audio discovery -> usability filtering -> segment generation -> final split selection -> training readiness**
 
+For the current project, that mental model should be extended one step further downstream:
+
+**raw audio discovery -> usability filtering -> segment generation -> final split selection -> log-mel feature readiness -> training readiness**
+
 ---
 
 ## 3. Why this notebook matters in the pipeline
@@ -48,6 +73,11 @@ A good mental model is:
 * assign final train/validation/test splits at the source-audio level.
 
 That means the notebook is really a **data audit and pipeline-understanding notebook**.
+
+In the current production-like path, it should also help answer whether the outputs are ready for:
+
+1. `2_build_log_mel_dataset.py`
+2. `logmel_cnn_v1.py`
 
 It should answer questions like:
 
@@ -67,6 +97,7 @@ The notebook should load the following inputs:
 * `manifest_all_samples.parquet`
 * `manifest_final_samples.parquet`
 * `settings.json`
+* optional downstream log-mel split indexes when they exist
 
 The script and markdown documentation show that the sampling configuration is read from `settings.data_sampling_settings`, especially:
 
@@ -112,7 +143,8 @@ Explain:
 
 * what the notebook analyzes;
 * which pipeline artifacts it depends on;
-* that it is focused on EDA and data understanding, not model training.
+* that it is focused on EDA and data understanding, not model training;
+* where it sits between `2_build_log_mel_dataset.py` and `logmel_cnn_v1.py`.
 
 ### Section 2. Configuration and path setup
 

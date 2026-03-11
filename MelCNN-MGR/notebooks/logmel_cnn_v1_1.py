@@ -1,13 +1,24 @@
 # %% [markdown]
-# # Log-Mel CNN v1
+# # Log-Mel CNN v1.1
+#
+# Improved version of `logmel_cnn_v1.py` targeting higher Macro-F1 via:
+# - **Macro-F1-driven checkpointing + EarlyStopping** — align training control with the primary metric
+# - **Mixup augmentation** (α=0.3) — primary regularizer against overfitting
+# - **Mixup before SpecAugment** — follows the intended augmentation order
+# - **Stronger SpecAugment** (freq=24, time=40) — harder partial-info training
+# - **Class-weight capping** (max 1.5) — prevent Metal over-prediction
+# - **More dropout** — SpatialDropout2D in all conv blocks + higher final Dropout
+# - **Higher weight decay** (5e-4) — stronger L2 regularisation
+# - **Dense bottleneck** before output — better feature disentangling
+# - **Lower LR** (5e-4) and **longer warmup** (5 epochs) — stability
+# - **Label smoothing disabled with Mixup** — avoid over-softening targets
 #
 # Train directly from prebuilt log-mel `.npy` features referenced by:
 # - `logmel_manifest_train.parquet`
 # - `logmel_manifest_val.parquet`
 # - `logmel_manifest_test.parquet`
 #
-# This script treats the precomputed log-mel dataset as the authoritative model
-# input. Feature extraction should happen upstream via:
+# Feature extraction should happen upstream via:
 # `MelCNN-MGR/preprocessing/2_build_log_mel_dataset.py`
 
 # %% [markdown]
@@ -69,12 +80,15 @@ RUN_DIR = None
 
 EPOCHS = int(os.environ.get("LOGMEL_CNN_EPOCHS", "99"))
 BATCH_SIZE = int(os.environ.get("LOGMEL_CNN_BATCH_SIZE", "32"))
-LABEL_SMOOTHING = 0.02
-WEIGHT_DECAY = 1e-4
+LABEL_SMOOTHING = 0.0            # Mixup already softens labels; keep CE targets sharp otherwise
+WEIGHT_DECAY = 5e-4                # v1.1: 5e-4 (was 1e-4)
 
-SPEC_AUG_FREQ_MASK = 15
-SPEC_AUG_TIME_MASK = 25
+SPEC_AUG_FREQ_MASK = 24            # v1.1: 24 (was 15)
+SPEC_AUG_TIME_MASK = 40            # v1.1: 40 (was 25)
 SPEC_AUG_NUM_MASKS = 2
+
+MAX_CLASS_WEIGHT = 1.5             # v1.1: cap class weights to prevent over-prediction
+MIXUP_ALPHA = 0.3                  # v1.1: Mixup blending parameter (Beta distribution)
 
 SEED = 36
 random.seed(SEED)
@@ -367,27 +381,36 @@ test_df["label_int"] = label_enc.transform(test_df["genre_top"].to_numpy())
 
 train_labels = train_df["label_int"].to_numpy()
 present_train_classes = np.unique(train_labels)
-class_weights = compute_class_weight(
+raw_class_weights = compute_class_weight(
     class_weight="balanced",
     classes=present_train_classes,
     y=train_labels,
 )
+# v1.1: Cap extreme weights to MAX_CLASS_WEIGHT
+capped_class_weights = np.minimum(raw_class_weights, MAX_CLASS_WEIGHT)
 class_weight_dict = {
     int(class_id): float(weight)
-    for class_id, weight in zip(present_train_classes, class_weights)
+    for class_id, weight in zip(present_train_classes, capped_class_weights)
 }
 missing_train_class_ids = sorted(set(range(N_CLASSES)) - set(present_train_classes.tolist()))
 
-print("Class weights:")
+print(f"Class weights (capped at {MAX_CLASS_WEIGHT}):")
 for i, genre in enumerate(GENRE_CLASSES):
     if i in class_weight_dict:
-        print(f"  {genre:<20s}  {class_weight_dict[i]:.4f}")
+        raw_w = float(raw_class_weights[list(present_train_classes).index(i)]) if i in present_train_classes else 0.0
+        capped = " (capped)" if raw_w > MAX_CLASS_WEIGHT else ""
+        print(f"  {genre:<20s}  {class_weight_dict[i]:.4f}{capped}  (raw: {raw_w:.4f})")
     else:
         print(f"  {genre:<20s}  absent in train -> no class weight applied")
 
 if missing_train_class_ids:
     missing_train_genres = [GENRE_CLASSES[i] for i in missing_train_class_ids]
     print(f"[WARN] Train split is missing classes: {missing_train_genres}")
+
+CLASS_WEIGHT_VECTOR = tf.constant(
+    [class_weight_dict.get(i, 1.0) for i in range(N_CLASSES)],
+    dtype=tf.float32,
+)
 
 
 def compute_train_stats(index_df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
@@ -461,6 +484,44 @@ def spec_augment(x, freq_mask=SPEC_AUG_FREQ_MASK, time_mask=SPEC_AUG_TIME_MASK, 
     return x
 
 
+def spec_augment_batch(x_batch):
+    augmented = tf.map_fn(
+        lambda x: spec_augment(x),
+        x_batch,
+        fn_output_signature=tf.float32,
+    )
+    augmented.set_shape((None, *LOGMEL_SHAPE, 1))
+    return augmented
+
+
+def mixup_batch(x_batch, y_batch, alpha=MIXUP_ALPHA):
+    """Apply Mixup augmentation at the batch level using one λ per sample pair."""
+    batch_size = tf.shape(x_batch)[0]
+    lam_a = tf.random.gamma(shape=[batch_size], alpha=alpha, dtype=tf.float32)
+    lam_b = tf.random.gamma(shape=[batch_size], alpha=alpha, dtype=tf.float32)
+    lam = lam_a / (lam_a + lam_b)
+    lam = tf.maximum(lam, 1.0 - lam)  # keep λ >= 0.5 so the anchor sample dominates
+
+    indices = tf.random.shuffle(tf.range(batch_size))
+    x_shuffled = tf.gather(x_batch, indices)
+    y_shuffled = tf.gather(y_batch, indices)
+
+    lam_x = tf.reshape(lam, [-1, 1, 1, 1])
+    lam_y = tf.reshape(lam, [-1, 1])
+
+    x_mixed = lam_x * x_batch + (1.0 - lam_x) * x_shuffled
+    y_mixed = lam_y * y_batch + (1.0 - lam_y) * y_shuffled
+    x_mixed.set_shape((None, *LOGMEL_SHAPE, 1))
+    y_mixed.set_shape((None, N_CLASSES))
+    return x_mixed, y_mixed
+
+
+def attach_class_weights(x_batch, y_batch):
+    sample_weights = tf.reduce_sum(y_batch * CLASS_WEIGHT_VECTOR[tf.newaxis, :], axis=1)
+    sample_weights.set_shape((None,))
+    return x_batch, y_batch, sample_weights
+
+
 def make_dataset(index_df: pd.DataFrame, batch_size: int, shuffle: bool, augment: bool = False) -> tf.data.Dataset:
     paths = index_df["logmel_path"].to_numpy(dtype=str)
     labels = index_df["label_int"].to_numpy(dtype=np.int32)
@@ -477,20 +538,28 @@ def make_dataset(index_df: pd.DataFrame, batch_size: int, shuffle: bool, augment
         return x, y_oh
 
     ds = ds.map(_load_and_norm, num_parallel_calls=AUTOTUNE)
+    ds = ds.batch(batch_size)
+
     if augment:
-        ds = ds.map(lambda x, y: (spec_augment(x), y), num_parallel_calls=AUTOTUNE)
-    ds = ds.batch(batch_size).prefetch(AUTOTUNE)
+        # Order: normalize -> batch -> Mixup -> SpecAugment
+        ds = ds.map(lambda x, y: mixup_batch(x, y, MIXUP_ALPHA), num_parallel_calls=AUTOTUNE)
+        ds = ds.map(lambda x, y: (spec_augment_batch(x), y), num_parallel_calls=AUTOTUNE)
+
+    ds = ds.prefetch(AUTOTUNE)
     return ds
 
 
 train_ds = make_dataset(train_df, BATCH_SIZE, shuffle=True, augment=True)
+train_fit_ds = train_ds.map(attach_class_weights, num_parallel_calls=AUTOTUNE).prefetch(AUTOTUNE)
+train_eval_ds = make_dataset(train_df, BATCH_SIZE, shuffle=False, augment=False)
 val_ds = make_dataset(val_df, BATCH_SIZE, shuffle=False, augment=False)
 test_ds = make_dataset(test_df, BATCH_SIZE, shuffle=False, augment=False)
 
 print("\nDatasets ready:")
-print(f"  train batches: {tf.data.experimental.cardinality(train_ds).numpy()}  (SpecAugment=ON)")
-print(f"  val   batches: {tf.data.experimental.cardinality(val_ds).numpy()}  (SpecAugment=OFF)")
-print(f"  test  batches: {tf.data.experimental.cardinality(test_ds).numpy()}  (SpecAugment=OFF)")
+print(f"  train batches: {tf.data.experimental.cardinality(train_ds).numpy()}  (SpecAugment=ON, Mixup=ON)")
+print(f"  train eval    : {tf.data.experimental.cardinality(train_eval_ds).numpy()}  (SpecAugment=OFF, Mixup=OFF)")
+print(f"  val   batches: {tf.data.experimental.cardinality(val_ds).numpy()}  (SpecAugment=OFF, Mixup=OFF)")
+print(f"  test  batches: {tf.data.experimental.cardinality(test_ds).numpy()}  (SpecAugment=OFF, Mixup=OFF)")
 
 _section_times["6. Preprocessing"] = time.perf_counter() - _t0
 print(f"\nPreprocessing : {_section_times['6. Preprocessing']:.2f}s")
@@ -506,37 +575,46 @@ _t0 = time.perf_counter()
 def build_model(n_classes: int) -> keras.Model:
     inputs = keras.Input(shape=(*LOGMEL_SHAPE, 1), name="logmel")
 
+    # Block 1: 32 filters, 5×5
     x = layers.Conv2D(32, (5, 5), padding="same", use_bias=False, name="conv1")(inputs)
     x = layers.BatchNormalization(name="bn1")(x)
     x = layers.ReLU(name="relu1")(x)
     x = layers.MaxPool2D((2, 2), name="pool1")(x)
 
+    # Block 2: 64 filters, 3×3
     x = layers.Conv2D(64, (3, 3), padding="same", use_bias=False, name="conv2")(x)
     x = layers.BatchNormalization(name="bn2")(x)
     x = layers.ReLU(name="relu2")(x)
     x = layers.SpatialDropout2D(0.10, name="sdrop2")(x)
     x = layers.MaxPool2D((2, 2), name="pool2")(x)
 
+    # Block 3: 128 filters, 3×3
     x = layers.Conv2D(128, (3, 3), padding="same", use_bias=False, name="conv3")(x)
     x = layers.BatchNormalization(name="bn3")(x)
     x = layers.ReLU(name="relu3")(x)
     x = layers.SpatialDropout2D(0.10, name="sdrop3")(x)
     x = layers.MaxPool2D((2, 2), name="pool3")(x)
 
+    # Block 4: 256 filters — v1.1: added SpatialDropout2D(0.12)
     x = layers.Conv2D(256, (3, 3), padding="same", use_bias=False, name="conv4")(x)
     x = layers.BatchNormalization(name="bn4")(x)
     x = layers.ReLU(name="relu4")(x)
+    x = layers.SpatialDropout2D(0.12, name="sdrop4")(x)
     x = layers.MaxPool2D((2, 2), name="pool4")(x)
 
+    # Block 5: 256 filters — v1.1: added SpatialDropout2D(0.12)
     x = layers.Conv2D(256, (3, 3), padding="same", use_bias=False, name="conv5")(x)
     x = layers.BatchNormalization(name="bn5")(x)
     x = layers.ReLU(name="relu5")(x)
+    x = layers.SpatialDropout2D(0.12, name="sdrop5")(x)
     x = layers.MaxPool2D((2, 2), name="pool5")(x)
 
+    # Classifier head — v1.1: Dense(128) bottleneck + higher Dropout(0.30)
     x = layers.GlobalAveragePooling2D(name="gap")(x)
-    x = layers.Dropout(0.2, name="dropout")(x)
+    x = layers.Dense(128, activation="relu", name="fc_bottleneck")(x)
+    x = layers.Dropout(0.30, name="dropout")(x)
     outputs = layers.Dense(n_classes, activation="softmax", name="fc_out")(x)
-    return keras.Model(inputs, outputs, name="logmel_cnn_v1")
+    return keras.Model(inputs, outputs, name="logmel_cnn_v1_1")
 
 
 with tf.device(RUNTIME_DEVICE):
@@ -555,12 +633,12 @@ print(f"\nBuild model : {_section_times['7. Build model']:.2f}s")
 _t0 = time.perf_counter()
 
 _run_ts = time.strftime("%Y%m%d-%H%M%S")
-RUN_DIR = MODELS_BASE_DIR / f"logmel-cnn-v1-{_run_ts}"
+RUN_DIR = MODELS_BASE_DIR / f"logmel-cnn-v1_1-{_run_ts}"
 RUN_DIR.mkdir(parents=True, exist_ok=True)
 print(f"Run directory : {RUN_DIR}")
 
-WARMUP_EPOCHS = 3
-LR_MAX = 1e-3
+WARMUP_EPOCHS = 5                   # v1.1: 5 (was 3)
+LR_MAX = 5e-4                       # v1.1: 5e-4 (was 1e-3)
 LR_MIN = 1e-6
 
 steps_per_epoch = tf.data.experimental.cardinality(train_ds).numpy()
@@ -606,48 +684,55 @@ with tf.device(RUNTIME_DEVICE):
     )
 
 
-class _MacroF1Checkpoint(tf.keras.callbacks.Callback):
-    def __init__(self, val_ds: tf.data.Dataset, filepath: str, total_epochs: int, check_freq: int = 3, mid_freq: int = 2, mid_freq_from_epoch: int = 30, dense_from_epoch: int = 60):
+class _ValMacroF1(tf.keras.callbacks.Callback):
+    def __init__(self, val_ds: tf.data.Dataset):
         super().__init__()
         self.val_ds = val_ds
-        self.filepath = filepath
-        self.total_epochs = max(1, int(total_epochs))
-        self.check_freq = max(1, check_freq)
-        self.mid_freq = max(1, mid_freq)
-        self.mid_freq_from_epoch = mid_freq_from_epoch
-        self.dense_from_epoch = dense_from_epoch
-        self.best_f1 = -1.0
         self.f1_history = []
 
-    def _should_check(self, epoch: int) -> bool:
-        if (epoch + 1) >= self.total_epochs or getattr(self.model, "stop_training", False):
-            return True
-        if epoch >= self.dense_from_epoch:
-            return True
-        if epoch >= self.mid_freq_from_epoch:
-            return (epoch - self.mid_freq_from_epoch) % self.mid_freq == 0
-        return (epoch + 1) % self.check_freq == 0
-
     def on_epoch_end(self, epoch, logs=None):
-        if not self._should_check(epoch):
-            self.f1_history.append(self.f1_history[-1] if self.f1_history else 0.0)
-            return
-
         y_true, y_pred = [], []
         for xb, yb in self.val_ds:
             preds = self.model(xb, training=False).numpy()
             y_pred.append(np.argmax(preds, axis=1))
             y_true.append(np.argmax(yb.numpy(), axis=1))
-        macro_f1 = float(f1_score(np.concatenate(y_true), np.concatenate(y_pred), average="macro", zero_division=0))
+
+        macro_f1 = float(
+            f1_score(
+                np.concatenate(y_true),
+                np.concatenate(y_pred),
+                average="macro",
+                zero_division=0,
+            )
+        )
         self.f1_history.append(macro_f1)
+
         if logs is not None:
             logs["val_macro_f1"] = macro_f1
-        if macro_f1 > self.best_f1:
-            self.best_f1 = macro_f1
-            self.model.save(self.filepath)
-            print(f"\n  [MacroF1Checkpoint] epoch {epoch + 1}: val_macro_f1 = {macro_f1:.4f} ★ improved -> saved")
-        else:
-            print(f"\n  [MacroF1Checkpoint] epoch {epoch + 1}: val_macro_f1 = {macro_f1:.4f}  (best = {self.best_f1:.4f})")
+
+        print(f"\n  [ValMacroF1] epoch {epoch + 1}: val_macro_f1 = {macro_f1:.4f}")
+
+
+class _TrainEvalAccuracy(tf.keras.callbacks.Callback):
+    def __init__(self, train_eval_ds: tf.data.Dataset):
+        super().__init__()
+        self.train_eval_ds = train_eval_ds
+        self.accuracy_history = []
+
+    def on_epoch_end(self, epoch, logs=None):
+        y_true, y_pred = [], []
+        for xb, yb in self.train_eval_ds:
+            preds = self.model(xb, training=False).numpy()
+            y_pred.append(np.argmax(preds, axis=1))
+            y_true.append(np.argmax(yb.numpy(), axis=1))
+
+        train_eval_accuracy = float(accuracy_score(np.concatenate(y_true), np.concatenate(y_pred)))
+        self.accuracy_history.append(train_eval_accuracy)
+
+        if logs is not None:
+            logs["train_eval_accuracy"] = train_eval_accuracy
+
+        print(f"  [TrainEval] epoch {epoch + 1}: train_eval_accuracy = {train_eval_accuracy:.4f}")
 
 
 class _LRLogger(tf.keras.callbacks.Callback):
@@ -677,15 +762,27 @@ class _EpochTimer(tf.keras.callbacks.Callback):
 
 lr_logger = _LRLogger()
 epoch_timer = _EpochTimer()
-f1_ckpt = _MacroF1Checkpoint(
-    val_ds=val_ds,
-    filepath=str(RUN_DIR / "best_model_macro_f1.keras"),
-    total_epochs=EPOCHS,
-)
+val_macro_f1_cb = _ValMacroF1(val_ds=val_ds)
+train_eval_acc_cb = _TrainEvalAccuracy(train_eval_ds=train_eval_ds)
 
 callbacks = [
-    tf.keras.callbacks.EarlyStopping(monitor="val_loss", patience=9, restore_best_weights=True, verbose=1),
-    f1_ckpt,
+    val_macro_f1_cb,
+    train_eval_acc_cb,
+    tf.keras.callbacks.ModelCheckpoint(
+        filepath=str(RUN_DIR / "best_model_macro_f1.keras"),
+        monitor="val_macro_f1",
+        mode="max",
+        save_best_only=True,
+        save_weights_only=False,
+        verbose=1,
+    ),
+    tf.keras.callbacks.EarlyStopping(
+        monitor="val_macro_f1",
+        mode="max",
+        patience=10,
+        restore_best_weights=False,
+        verbose=1,
+    ),
     lr_logger,
     epoch_timer,
 ]
@@ -696,25 +793,24 @@ print(f"Optimizer    : AdamW(cosine_annealing, warmup={WARMUP_EPOCHS}ep, lr_max=
 
 with tf.device(RUNTIME_DEVICE):
     history = model.fit(
-        train_ds,
+        train_fit_ds,
         validation_data=val_ds,
         epochs=EPOCHS,
         callbacks=callbacks,
-        class_weight=class_weight_dict,
     )
 
 num_epochs = len(history.history["loss"])
 best_loss_epoch = min(range(num_epochs), key=lambda i: history.history["val_loss"][i])
-best_f1_epoch = int(np.argmax(f1_ckpt.f1_history)) if f1_ckpt.f1_history else best_loss_epoch
+best_f1_epoch = int(np.argmax(val_macro_f1_cb.f1_history)) if val_macro_f1_cb.f1_history else best_loss_epoch
 best_epoch = best_f1_epoch
 
 print(f"\nBest epoch by val_loss : {best_loss_epoch + 1}/{num_epochs}  (val_loss={history.history['val_loss'][best_loss_epoch]:.4f})")
-print(f"Best epoch by macro_F1 : {best_f1_epoch + 1}/{num_epochs}  (val_macro_f1={f1_ckpt.f1_history[best_f1_epoch]:.4f})")
+print(f"Best epoch by macro_F1 : {best_f1_epoch + 1}/{num_epochs}  (val_macro_f1={val_macro_f1_cb.f1_history[best_f1_epoch]:.4f})")
 
 _section_times["8. Compile & train"] = time.perf_counter() - _t0
 print(f"\nCompile & train : {_section_times['8. Compile & train']:.1f}s")
 
-model_path = RUN_DIR / "logmel_cnn_v1.keras"
+model_path = RUN_DIR / "logmel_cnn_v1_1.keras"
 model.save(str(model_path))
 np.savez(str(RUN_DIR / "norm_stats.npz"), mu=mu, std=std, genre_classes=np.array(GENRE_CLASSES))
 
@@ -730,7 +826,13 @@ epochs_range = range(1, len(hist["accuracy"]) + 1)
 
 fig, (ax_acc, ax_loss, ax_f1) = plt.subplots(1, 3, figsize=(18, 4))
 
-ax_acc.plot(epochs_range, hist["accuracy"], label="Train", linewidth=2)
+if train_eval_acc_cb.accuracy_history:
+    ax_acc.plot(
+        epochs_range,
+        train_eval_acc_cb.accuracy_history,
+        label="Train (clean eval)",
+        linewidth=2,
+    )
 ax_acc.plot(epochs_range, hist["val_accuracy"], label="Validation", linewidth=2, linestyle="--")
 ax_acc.set_title("Accuracy")
 ax_acc.set_xlabel("Epoch")
@@ -746,8 +848,8 @@ ax_loss.set_ylabel("Categorical cross-entropy")
 ax_loss.legend(fontsize=8)
 ax_loss.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
 
-if f1_ckpt.f1_history:
-    ax_f1.plot(epochs_range, f1_ckpt.f1_history, label="Val Macro-F1", linewidth=2.5, color="darkorange")
+if val_macro_f1_cb.f1_history:
+    ax_f1.plot(epochs_range, val_macro_f1_cb.f1_history, label="Val Macro-F1", linewidth=2.5, color="darkorange")
     ax_f1.axvline(best_f1_epoch + 1, color="darkorange", linestyle=":", linewidth=1.5, label=f"Best F1 epoch ({best_f1_epoch + 1})")
     if best_loss_epoch != best_f1_epoch:
         ax_f1.axvline(best_loss_epoch + 1, color="steelblue", linestyle=":", linewidth=1.2, label=f"Best val_loss epoch ({best_loss_epoch + 1})")
@@ -762,7 +864,7 @@ for axis in (ax_acc, ax_loss, ax_f1):
     for spine in ["top", "right"]:
         axis.spines[spine].set_visible(False)
 
-fig.suptitle("Training history — Log-Mel CNN v1")
+fig.suptitle("Training history — Log-Mel CNN v1.1")
 plt.tight_layout()
 plt.show()
 
@@ -833,7 +935,7 @@ else:
     eval_model = model
 
 with tf.device(RUNTIME_DEVICE):
-    y_train_true, y_train_pred, train_metrics = eval_dataset(eval_model, train_ds, GENRE_CLASSES, "TRAIN SET")
+    y_train_true, y_train_pred, train_metrics = eval_dataset(eval_model, train_eval_ds, GENRE_CLASSES, "TRAIN SET")
     y_val_true, y_val_pred, val_metrics = eval_dataset(eval_model, val_ds, GENRE_CLASSES, "VALIDATION SET")
     y_test_true, y_test_pred, test_metrics = eval_dataset(eval_model, test_ds, GENRE_CLASSES, "TEST SET")
 
@@ -845,7 +947,7 @@ cm = confusion_matrix(y_test_true, y_test_pred, labels=np.arange(N_CLASSES))
 fig, ax = plt.subplots(figsize=(13, 11))
 disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=GENRE_CLASSES)
 disp.plot(ax=ax, xticks_rotation=45, colorbar=True, cmap="Blues", values_format="d")
-ax.set_title("Confusion matrix — test set (logmel_cnn_v1)")
+ax.set_title("Confusion matrix — test set (logmel_cnn_v1_1)")
 plt.tight_layout()
 plt.show()
 
@@ -860,7 +962,7 @@ print(f"Evaluation : {_section_times['10. Evaluation']:.2f}s")
 _t0 = time.perf_counter()
 
 report = {
-    "run_id": f"logmel-cnn-v1-{_run_ts}",
+    "run_id": f"logmel-cnn-v1_1-{_run_ts}",
     "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     "logmel_dataset_dir": str(LOGMEL_DATASET_DIR),
     "manifests": {
@@ -889,8 +991,15 @@ report = {
         "batch_size": BATCH_SIZE,
         "label_smoothing": LABEL_SMOOTHING,
         "weight_decay": WEIGHT_DECAY,
+        "mixup_alpha": MIXUP_ALPHA,
+        "spec_aug_freq_mask": SPEC_AUG_FREQ_MASK,
+        "spec_aug_time_mask": SPEC_AUG_TIME_MASK,
+        "max_class_weight": MAX_CLASS_WEIGHT,
+        "warmup_epochs": WARMUP_EPOCHS,
+        "lr_max": LR_MAX,
         "best_epoch_val_loss": best_loss_epoch + 1,
         "best_epoch_macro_f1": best_f1_epoch + 1,
+        "train_eval_accuracy_per_epoch": train_eval_acc_cb.accuracy_history,
         "lr_per_epoch": lr_logger.lrs,
         "seconds_per_epoch": epoch_timer.times,
     },
@@ -899,9 +1008,25 @@ report = {
         "validation": val_metrics,
         "test": test_metrics,
     },
+    "changes_from_v1": {
+        "training_control": "val_loss-driven -> val_macro_f1-driven checkpointing and early stopping",
+        "weight_decay": "1e-4 -> 5e-4",
+        "label_smoothing": "0.02 -> 0.0 (disabled because Mixup is enabled)",
+        "spec_aug_freq_mask": "15 -> 24",
+        "spec_aug_time_mask": "25 -> 40",
+        "max_class_weight": "uncapped -> 1.5",
+        "mixup_alpha": "none -> 0.3",
+        "augmentation_order": "normalize -> Mixup -> SpecAugment",
+        "spatial_dropout_blocks_4_5": "none -> 0.12",
+        "final_dropout": "0.20 -> 0.30",
+        "classifier": "GAP->Dropout->Dense(10) -> GAP->Dense(128,relu)->Dropout(0.30)->Dense(10)",
+        "lr_max": "1e-3 -> 5e-4",
+        "warmup_epochs": "3 -> 5",
+        "early_stopping_patience": "9 -> 10",
+    },
 }
 
-report_path = RUN_DIR / "run_report_logmel_cnn_v1.json"
+report_path = RUN_DIR / "run_report_logmel_cnn_v1_1.json"
 report_path.write_text(json.dumps(report, indent=2))
 print(f"Run report -> {report_path}")
 

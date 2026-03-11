@@ -4,6 +4,21 @@
 
 `MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py` is the manifest builder for the MelCNN-MGR data pipeline.
 
+It sits inside the current production-like path:
+
+```text
+download_by_genre_limits.py
+  -> extract_mtg_processed_samples.py
+
+data sources: FMA + additional_datasets
+  -> 1_build_all_datasets_and_samples.py
+  -> 2_build_log_mel_dataset.py
+  -> MelCNN_MGR_Manifest_LogMel_EDA.ipynb
+  -> logmel_cnn_v1.py
+```
+
+The downloader and MTG/Jamendo extractor are upstream preparation steps for additional-source audio. This script is the point where FMA and `additional_datasets` first become one shared manifest contract.
+
 It creates the three core parquet artifacts used by downstream preprocessing and model training:
 
 1. `manifest_all_datasets.parquet`
@@ -49,6 +64,11 @@ So the separation is real at the data-contract level, and the CLI now exposes th
 
 This script sits between raw audio discovery and feature extraction.
 
+More concretely, it is the boundary between:
+
+1. prepared source collections under FMA and `additional_datasets`
+2. downstream log-mel feature building and training consumers
+
 Its job is not to compute mel spectrograms or train models. Its job is to produce a deterministic, auditable sampling plan that answers these questions:
 
 1. Which audio files exist and are in scope?
@@ -58,6 +78,12 @@ Its job is not to compute mel spectrograms or train models. Its job is to produc
 5. Which segments belong to the final train, validation, and test sets?
 
 The downstream log-mel builder can then consume `manifest_final_samples.parquet` without having to repeat dataset discovery logic.
+
+The current default downstream consumers are:
+
+1. `MelCNN-MGR/preprocessing/2_build_log_mel_dataset.py`
+2. `MelCNN-MGR/notebooks/MelCNN_MGR_Manifest_LogMel_EDA.ipynb`
+3. `MelCNN-MGR/notebooks/logmel_cnn_v1.py`
 
 ## Script inputs
 
