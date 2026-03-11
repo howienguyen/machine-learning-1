@@ -27,8 +27,8 @@ import numpy as np
 import soundfile as sf
 
 
-DEFAULT_INPUT_DIR = Path("genre_downloads")
-DEFAULT_OUTPUT_DIR = Path("mtg-processed-samples")
+DEFAULT_INPUT_DIR = Path("genre_downloads/metal")
+DEFAULT_OUTPUT_DIR = Path("mtg-processed-samples/metal")
 SUPPORTED_EXTENSIONS = {".mp3", ".wav"}
 
 
@@ -61,7 +61,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-num-segments",
         type=int,
-        default=3,
+        default=600,
         help=(
             "Maximum number of segments to extract from a single file. "
             "Files longer than min-duration-seconds but <= 30s use 1 segment; "

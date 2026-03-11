@@ -12,6 +12,8 @@ debugpy==1.8.20
 decorator==5.2.1
 executing==2.2.1
 flatbuffers==25.12.19
+fastapi==0.116.1
+Flask==3.1.2
 fonttools==4.61.1
 gast==0.7.0
 google-auth==2.48.0
@@ -65,6 +67,7 @@ protobuf==4.23.4
 psutil==7.2.2
 ptyprocess==0.7.0
 pure_eval==0.2.3
+python-multipart==0.0.20
 pyarrow==23.0.1
 pyasn1==0.6.2
 pyasn1_modules==0.4.2
@@ -91,6 +94,8 @@ tornado==6.5.4
 traitlets==5.14.3
 typing_extensions==4.15.0
 urllib3==2.6.3
+uvicorn==0.35.0
 wcwidth==0.6.0
+websocket-client==1.8.0
 Werkzeug==3.1.6
 wrapt==1.14.2

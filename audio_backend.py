@@ -96,19 +96,6 @@ def on_chunk(pcm_bytes: bytes, sample_rate: int, channels: int) -> None:
     _session["chunk_count"] = _session.get("chunk_count", 0) + 1
     _session["total_bytes"] = _session.get("total_bytes", 0) + len(pcm_bytes)
 
-    rms = _rms(pcm_bytes)
-    elapsed = time.monotonic() - _session.get("start_time", time.monotonic())
-    duration = _duration_s(len(pcm_bytes), sample_rate, channels)
-
-    logger.debug(
-        "[BACKEND] Chunk #%d  size=%d B  duration=%.3f s  rms=%.4f  elapsed=%.1f s",
-        _session["chunk_count"],
-        len(pcm_bytes),
-        duration,
-        rms,
-        elapsed,
-    )
-
     # TODO: run VAD, send to feature extractor ring-buffer, etc.
 
 

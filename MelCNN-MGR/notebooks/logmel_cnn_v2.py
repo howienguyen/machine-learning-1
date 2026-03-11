@@ -1,7 +1,7 @@
 # %% [markdown]
-# # Log-Mel CNN v1.1
+# # Log-Mel CNN v2
 #
-# Improved version of `logmel_cnn_v1.py` targeting higher Macro-F1 via:
+# Warm-start-capable version of `logmel_cnn_v1_1.py` targeting higher Macro-F1 via:
 # - **Macro-F1-driven checkpointing + EarlyStopping** — align training control with the primary metric
 # - **Mixup augmentation** (α=0.3) — primary regularizer against overfitting
 # - **Mixup before SpecAugment** — follows the intended augmentation order
@@ -12,6 +12,9 @@
 # - **Dense bottleneck** before output — better feature disentangling
 # - **Lower LR** (5e-4) and **longer warmup** (5 epochs) — stability
 # - **Label smoothing disabled with Mixup** — avoid over-softening targets
+# - **Optional warm-start initialization** — start a fresh run from an existing `.keras` checkpoint
+# - **Backbone-only reset warning** — make it explicit when `backbone_only` resets the classifier head despite matching classes
+# - **Optional staged backbone freezing** — `--freeze-backbone-epochs N` trains the fresh head first, then unfreezes the transferred backbone
 #
 # Train directly from prebuilt log-mel `.npy` features referenced by:
 # - `logmel_manifest_train.parquet`
@@ -20,11 +23,16 @@
 #
 # Feature extraction should happen upstream via:
 # `MelCNN-MGR/preprocessing/2_build_log_mel_dataset.py`
+#
+# Warm-start usage example:
+# python MelCNN-MGR/notebooks/logmel_cnn_v2.py --pretrained-model MelCNN-MGR/models/logmel-cnn-demo/best_model_macro_f1.keras
+# python MelCNN-MGR/notebooks/logmel_cnn_v2.py --pretrained-model MelCNN-MGR/models/logmel-cnn-demo/best_model_macro_f1.keras --pretrained-mode backbone_only --freeze-backbone-epochs 3
 
 # %% [markdown]
 # ## 1. Imports
 
 # %%
+import argparse
 import json
 import os
 import platform
@@ -32,6 +40,7 @@ import random
 import time
 import warnings
 from pathlib import Path
+from types import SimpleNamespace
 
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
@@ -51,6 +60,30 @@ warnings.filterwarnings("ignore", category=UserWarning)
 
 print(f"Python     : {platform.python_version()}")
 print(f"TensorFlow : {tf.__version__}")
+
+
+CLI_PARSER = argparse.ArgumentParser(
+    description="Train Log-Mel CNN v2 from scratch or warm-start from an existing .keras checkpoint.",
+)
+CLI_PARSER.add_argument(
+    "--pretrained-model",
+    type=str,
+    default=None,
+    help="Optional path to an existing .keras checkpoint used to initialize the new v2 run.",
+)
+CLI_PARSER.add_argument(
+    "--pretrained-mode",
+    choices=["full_model", "backbone_only"],
+    default=None,
+    help="Warm-start strategy: load the full compatible model or transfer only backbone weights into a fresh classifier head.",
+)
+CLI_PARSER.add_argument(
+    "--freeze-backbone-epochs",
+    type=int,
+    default=None,
+    help="Freeze transferred backbone layers for the first N epochs after backbone_only initialization.",
+)
+CLI_ARGS, _CLI_UNKNOWN = CLI_PARSER.parse_known_args()
 
 
 # %% [markdown]
@@ -77,8 +110,9 @@ TEST_MANIFEST_PATH = LOGMEL_DATASET_DIR / "logmel_manifest_test.parquet"
 LOGMEL_CONFIG_PATH = LOGMEL_DATASET_DIR / "logmel_config.json"
 
 RUN_DIR = None
+RUN_FAMILY = "logmel-cnn-v2"
 
-EPOCHS = int(os.environ.get("LOGMEL_CNN_EPOCHS", "99"))
+EPOCHS = int(os.environ.get("LOGMEL_CNN_EPOCHS", "128"))
 BATCH_SIZE = int(os.environ.get("LOGMEL_CNN_BATCH_SIZE", "32"))
 LABEL_SMOOTHING = 0.0            # Mixup already softens labels; keep CE targets sharp otherwise
 WEIGHT_DECAY = 5e-4                # v1.1: 5e-4 (was 1e-4)
@@ -89,6 +123,24 @@ SPEC_AUG_NUM_MASKS = 2
 
 MAX_CLASS_WEIGHT = 1.5             # v1.1: cap class weights to prevent over-prediction
 MIXUP_ALPHA = 0.3                  # v1.1: Mixup blending parameter (Beta distribution)
+
+PRETRAINED_MODEL_ENV = os.environ.get("LOGMEL_CNN_PRETRAINED_MODEL", "").strip()
+PRETRAINED_MODEL_RAW = (CLI_ARGS.pretrained_model or PRETRAINED_MODEL_ENV).strip()
+PRETRAINED_MODEL_PATH = Path(PRETRAINED_MODEL_RAW).expanduser().resolve() if PRETRAINED_MODEL_RAW else None
+PRETRAINED_MODE = (CLI_ARGS.pretrained_mode or os.environ.get("LOGMEL_CNN_PRETRAINED_MODE", "full_model")).strip().lower()
+FREEZE_BACKBONE_EPOCHS = max(
+    0,
+    int(
+        CLI_ARGS.freeze_backbone_epochs
+        if CLI_ARGS.freeze_backbone_epochs is not None
+        else os.environ.get("LOGMEL_CNN_FREEZE_BACKBONE_EPOCHS", "0")
+    ),
+)
+if PRETRAINED_MODEL_PATH is not None:
+    print(f"[WarmStart] LOGMEL_CNN_PRETRAINED_MODEL={PRETRAINED_MODEL_PATH}")
+    print(f"[WarmStart] PRETRAINED_MODE={PRETRAINED_MODE}")
+if FREEZE_BACKBONE_EPOCHS > 0:
+    print(f"[WarmStart] FREEZE_BACKBONE_EPOCHS={FREEZE_BACKBONE_EPOCHS}")
 
 SEED = 36
 random.seed(SEED)
@@ -614,11 +666,154 @@ def build_model(n_classes: int) -> keras.Model:
     x = layers.Dense(128, activation="relu", name="fc_bottleneck")(x)
     x = layers.Dropout(0.30, name="dropout")(x)
     outputs = layers.Dense(n_classes, activation="softmax", name="fc_out")(x)
-    return keras.Model(inputs, outputs, name="logmel_cnn_v1_1")
+    return keras.Model(inputs, outputs, name="logmel_cnn_v2")
 
 
-with tf.device(RUNTIME_DEVICE):
-    model = build_model(N_CLASSES)
+def _load_pretrained_genre_classes(model_path: Path) -> list[str] | None:
+    stats_path = model_path.parent / "norm_stats.npz"
+    if not stats_path.exists():
+        return None
+    data = np.load(str(stats_path), allow_pickle=True)
+    if "genre_classes" not in data:
+        return None
+    return data["genre_classes"].tolist()
+
+
+def _load_source_run_report(model_path: Path) -> tuple[dict[str, object] | None, Path | None]:
+    report_candidates = sorted(model_path.parent.glob("run_report_*.json"))
+    if not report_candidates:
+        return None, None
+
+    report_path = report_candidates[0]
+    try:
+        return json.loads(report_path.read_text()), report_path
+    except Exception as exc:
+        print(f"[WARN] Failed to read source run report from {report_path}: {exc}")
+        return None, report_path
+
+
+def _validate_pretrained_backbone_model(model: keras.Model, model_path: Path) -> None:
+    expected_input_shape = (None, *LOGMEL_SHAPE, 1)
+    if tuple(model.input_shape) != expected_input_shape:
+        raise ValueError(
+            "Pretrained backbone input shape mismatch. "
+            f"Expected {expected_input_shape}, got {model.input_shape} from {model_path}."
+        )
+
+
+def _transfer_backbone_weights(source_model: keras.Model, target_model: keras.Model) -> dict[str, object]:
+    transferred_layers: list[str] = []
+    skipped_layers: list[str] = []
+    source_layers = {layer.name: layer for layer in source_model.layers}
+
+    for target_layer in target_model.layers:
+        if target_layer.name == "fc_out":
+            skipped_layers.append("fc_out (classifier head replaced)")
+            continue
+
+        source_layer = source_layers.get(target_layer.name)
+        if source_layer is None:
+            skipped_layers.append(f"{target_layer.name} (missing in source model)")
+            continue
+
+        source_weights = source_layer.get_weights()
+        target_weights = target_layer.get_weights()
+        if not source_weights and not target_weights:
+            continue
+
+        if len(source_weights) != len(target_weights) or any(sw.shape != tw.shape for sw, tw in zip(source_weights, target_weights)):
+            skipped_layers.append(f"{target_layer.name} (shape mismatch)")
+            continue
+
+        target_layer.set_weights(source_weights)
+        transferred_layers.append(target_layer.name)
+
+    return {
+        "transferred_layers": transferred_layers,
+        "transferred_layer_count": len(transferred_layers),
+        "skipped_layers": skipped_layers,
+        "skipped_layer_count": len(skipped_layers),
+    }
+
+
+def _validate_pretrained_model(model: keras.Model, model_path: Path) -> None:
+    expected_input_shape = (None, *LOGMEL_SHAPE, 1)
+    if tuple(model.input_shape) != expected_input_shape:
+        raise ValueError(
+            "Pretrained model input shape mismatch. "
+            f"Expected {expected_input_shape}, got {model.input_shape} from {model_path}."
+        )
+
+    output_units = model.output_shape[-1]
+    if int(output_units) != N_CLASSES:
+        raise ValueError(
+            "Pretrained model output dimension mismatch. "
+            f"Expected {N_CLASSES} classes, got {output_units} from {model_path}."
+        )
+
+    pretrained_genres = _load_pretrained_genre_classes(model_path)
+    if pretrained_genres is not None and list(pretrained_genres) != list(GENRE_CLASSES):
+        raise ValueError(
+            "Pretrained model genre_classes do not match the current dataset order. "
+            f"Checkpoint genres={pretrained_genres}; current genres={GENRE_CLASSES}."
+        )
+
+
+SOURCE_RUN_REPORT = None
+SOURCE_RUN_REPORT_PATH = None
+WARM_START_TRANSFER_SUMMARY = None
+SOURCE_PRETRAINED_GENRES = None
+WARM_START_CLASS_SET_MATCH = False
+WARM_START_HEAD_RESET_INTENTIONAL = False
+APPLIED_FREEZE_BACKBONE_EPOCHS = 0
+TRAINING_STAGES = []
+
+if PRETRAINED_MODEL_PATH is not None:
+    if not PRETRAINED_MODEL_PATH.exists():
+        raise FileNotFoundError(f"Pretrained model not found: {PRETRAINED_MODEL_PATH}")
+    SOURCE_RUN_REPORT, SOURCE_RUN_REPORT_PATH = _load_source_run_report(PRETRAINED_MODEL_PATH)
+
+    if PRETRAINED_MODE == "full_model":
+        print(f"Warm start   : loading full pretrained model from {PRETRAINED_MODEL_PATH}")
+        with tf.device(RUNTIME_DEVICE):
+            model = tf.keras.models.load_model(str(PRETRAINED_MODEL_PATH), compile=False)
+        _validate_pretrained_model(model, PRETRAINED_MODEL_PATH)
+        INIT_MODE = "warm_start_full_model"
+    elif PRETRAINED_MODE == "backbone_only":
+        print(f"Warm start   : loading backbone weights from {PRETRAINED_MODEL_PATH}")
+        with tf.device(RUNTIME_DEVICE):
+            source_model = tf.keras.models.load_model(str(PRETRAINED_MODEL_PATH), compile=False)
+            model = build_model(N_CLASSES)
+        _validate_pretrained_backbone_model(source_model, PRETRAINED_MODEL_PATH)
+        SOURCE_PRETRAINED_GENRES = _load_pretrained_genre_classes(PRETRAINED_MODEL_PATH)
+        source_output_units = int(source_model.output_shape[-1])
+        WARM_START_CLASS_SET_MATCH = (
+            SOURCE_PRETRAINED_GENRES is not None
+            and list(SOURCE_PRETRAINED_GENRES) == list(GENRE_CLASSES)
+            and source_output_units == N_CLASSES
+        )
+        if WARM_START_CLASS_SET_MATCH:
+            WARM_START_HEAD_RESET_INTENTIONAL = True
+            print(
+                "[WarmStart][WARN] backbone_only was selected even though the source genre_classes "
+                "still match the current dataset. The classifier head `fc_out` is being reset intentionally. "
+                "Use `full_model` instead if that was not intended."
+            )
+        WARM_START_TRANSFER_SUMMARY = _transfer_backbone_weights(source_model, model)
+        print(
+            "Backbone transfer : "
+            f"transferred={WARM_START_TRANSFER_SUMMARY['transferred_layer_count']} "
+            f"skipped={WARM_START_TRANSFER_SUMMARY['skipped_layer_count']}"
+        )
+        INIT_MODE = "warm_start_backbone_only"
+    else:
+        raise ValueError(
+            f"Unsupported PRETRAINED_MODE={PRETRAINED_MODE!r}. Use 'full_model' or 'backbone_only'."
+        )
+else:
+    with tf.device(RUNTIME_DEVICE):
+        model = build_model(N_CLASSES)
+    INIT_MODE = "scratch"
 
 model.summary()
 
@@ -633,9 +828,12 @@ print(f"\nBuild model : {_section_times['7. Build model']:.2f}s")
 _t0 = time.perf_counter()
 
 _run_ts = time.strftime("%Y%m%d-%H%M%S")
-RUN_DIR = MODELS_BASE_DIR / f"logmel-cnn-v1_1-{_run_ts}"
+RUN_DIR = MODELS_BASE_DIR / f"{RUN_FAMILY}-{_run_ts}"
 RUN_DIR.mkdir(parents=True, exist_ok=True)
 print(f"Run directory : {RUN_DIR}")
+print(f"Init mode     : {INIT_MODE}")
+if PRETRAINED_MODEL_PATH is not None:
+    print(f"Warm-start mapping : source checkpoint={PRETRAINED_MODEL_PATH} -> destination run_dir={RUN_DIR}")
 
 WARMUP_EPOCHS = 5                   # v1.1: 5 (was 3)
 LR_MAX = 5e-4                       # v1.1: 5e-4 (was 1e-3)
@@ -676,12 +874,23 @@ class CosineAnnealingWithWarmup(tf.keras.optimizers.schedules.LearningRateSchedu
 
 lr_schedule = CosineAnnealingWithWarmup(warmup_steps, total_steps, LR_MAX, LR_MIN)
 
-with tf.device(RUNTIME_DEVICE):
-    model.compile(
-        optimizer=tf.keras.optimizers.AdamW(learning_rate=lr_schedule, weight_decay=WEIGHT_DECAY),
-        loss=tf.keras.losses.CategoricalCrossentropy(label_smoothing=LABEL_SMOOTHING),
-        metrics=["accuracy"],
-    )
+
+def _build_optimizer():
+    return tf.keras.optimizers.AdamW(learning_rate=lr_schedule, weight_decay=WEIGHT_DECAY)
+
+
+def compile_training_model(current_model: keras.Model) -> None:
+    with tf.device(RUNTIME_DEVICE):
+        current_model.compile(
+            optimizer=_build_optimizer(),
+            loss=tf.keras.losses.CategoricalCrossentropy(label_smoothing=LABEL_SMOOTHING),
+            metrics=["accuracy"],
+        )
+
+
+def set_backbone_trainable(current_model: keras.Model, backbone_trainable: bool) -> None:
+    for layer in current_model.layers:
+        layer.trainable = backbone_trainable or layer.name == "fc_out"
 
 
 class _ValMacroF1(tf.keras.callbacks.Callback):
@@ -765,39 +974,129 @@ epoch_timer = _EpochTimer()
 val_macro_f1_cb = _ValMacroF1(val_ds=val_ds)
 train_eval_acc_cb = _TrainEvalAccuracy(train_eval_ds=train_eval_ds)
 
-callbacks = [
-    val_macro_f1_cb,
-    train_eval_acc_cb,
-    tf.keras.callbacks.ModelCheckpoint(
-        filepath=str(RUN_DIR / "best_model_macro_f1.keras"),
-        monitor="val_macro_f1",
-        mode="max",
-        save_best_only=True,
-        save_weights_only=False,
-        verbose=1,
-    ),
-    tf.keras.callbacks.EarlyStopping(
-        monitor="val_macro_f1",
-        mode="max",
-        patience=12,
-        restore_best_weights=False,
-        verbose=1,
-    ),
-    lr_logger,
-    epoch_timer,
-]
+
+def make_training_callbacks(enable_checkpointing: bool, enable_early_stopping: bool):
+    stage_callbacks = [
+        val_macro_f1_cb,
+        train_eval_acc_cb,
+    ]
+    if enable_checkpointing:
+        stage_callbacks.append(
+            tf.keras.callbacks.ModelCheckpoint(
+                filepath=str(RUN_DIR / "best_model_macro_f1.keras"),
+                monitor="val_macro_f1",
+                mode="max",
+                save_best_only=True,
+                save_weights_only=False,
+                verbose=1,
+            )
+        )
+    if enable_early_stopping:
+        stage_callbacks.append(
+            tf.keras.callbacks.EarlyStopping(
+                monitor="val_macro_f1",
+                mode="max",
+                patience=12,
+                restore_best_weights=False,
+                verbose=1,
+            )
+        )
+    stage_callbacks.extend([lr_logger, epoch_timer])
+    return stage_callbacks
+
+
+def _merge_stage_histories(stage_histories: list[keras.callbacks.History]) -> SimpleNamespace:
+    merged_history = {}
+    for stage_history in stage_histories:
+        for key, values in stage_history.history.items():
+            merged_history.setdefault(key, []).extend(values)
+    return SimpleNamespace(history=merged_history)
+
+
+def _run_training_stage(
+    stage_name: str,
+    epochs_to_run: int,
+    initial_epoch: int,
+    backbone_trainable: bool,
+    enable_checkpointing: bool,
+    enable_early_stopping: bool,
+):
+    if epochs_to_run <= 0:
+        return None
+
+    set_backbone_trainable(model, backbone_trainable)
+    compile_training_model(model)
+    print(
+        f"Training stage : {stage_name} | epochs {initial_epoch + 1}..{initial_epoch + epochs_to_run} | "
+        f"backbone_trainable={backbone_trainable}"
+    )
+    with tf.device(RUNTIME_DEVICE):
+        stage_history = model.fit(
+            train_fit_ds,
+            validation_data=val_ds,
+            initial_epoch=initial_epoch,
+            epochs=initial_epoch + epochs_to_run,
+            callbacks=make_training_callbacks(enable_checkpointing, enable_early_stopping),
+        )
+
+    completed_epochs = len(stage_history.history.get("loss", []))
+    TRAINING_STAGES.append(
+        {
+            "name": stage_name,
+            "backbone_trainable": backbone_trainable,
+            "epochs_requested": epochs_to_run,
+            "epochs_completed": completed_epochs,
+            "initial_epoch": initial_epoch,
+            "final_epoch": initial_epoch + completed_epochs,
+        }
+    )
+    return stage_history
 
 print(f"Training on {RUNTIME_DEVICE} | epochs={EPOCHS}, batch_size={BATCH_SIZE}")
 print(f"Input source : {LOGMEL_DATASET_DIR}")
 print(f"Optimizer    : AdamW(cosine_annealing, warmup={WARMUP_EPOCHS}ep, lr_max={LR_MAX}, weight_decay={WEIGHT_DECAY})")
-
-with tf.device(RUNTIME_DEVICE):
-    history = model.fit(
-        train_fit_ds,
-        validation_data=val_ds,
-        epochs=EPOCHS,
-        callbacks=callbacks,
+if PRETRAINED_MODEL_PATH is not None:
+    print(f"Warm-start   : {PRETRAINED_MODEL_PATH}")
+    print(f"Warm-start mode : {PRETRAINED_MODE}")
+if FREEZE_BACKBONE_EPOCHS > 0 and INIT_MODE != "warm_start_backbone_only":
+    print(
+        "[WarmStart][WARN] --freeze-backbone-epochs was provided, but it only applies to "
+        "backbone_only warm starts. The value will be ignored for this run."
     )
+
+requested_frozen_epochs = FREEZE_BACKBONE_EPOCHS if INIT_MODE == "warm_start_backbone_only" else 0
+APPLIED_FREEZE_BACKBONE_EPOCHS = min(requested_frozen_epochs, EPOCHS)
+
+stage_histories = []
+if APPLIED_FREEZE_BACKBONE_EPOCHS > 0:
+    frozen_stage_history = _run_training_stage(
+        stage_name="head_only_frozen_backbone",
+        epochs_to_run=APPLIED_FREEZE_BACKBONE_EPOCHS,
+        initial_epoch=0,
+        backbone_trainable=False,
+        enable_checkpointing=APPLIED_FREEZE_BACKBONE_EPOCHS == EPOCHS,
+        enable_early_stopping=APPLIED_FREEZE_BACKBONE_EPOCHS == EPOCHS,
+    )
+    if frozen_stage_history is not None:
+        stage_histories.append(frozen_stage_history)
+
+remaining_epochs = EPOCHS - APPLIED_FREEZE_BACKBONE_EPOCHS
+if remaining_epochs > 0:
+    full_stage_history = _run_training_stage(
+        stage_name="full_finetune",
+        epochs_to_run=remaining_epochs,
+        initial_epoch=APPLIED_FREEZE_BACKBONE_EPOCHS,
+        backbone_trainable=True,
+        enable_checkpointing=True,
+        enable_early_stopping=True,
+    )
+    if full_stage_history is not None:
+        stage_histories.append(full_stage_history)
+
+if not stage_histories:
+    raise ValueError("No training stages were executed. Check EPOCHS and freeze-backbone settings.")
+
+history = _merge_stage_histories(stage_histories)
 
 num_epochs = len(history.history["loss"])
 best_loss_epoch = min(range(num_epochs), key=lambda i: history.history["val_loss"][i])
@@ -810,7 +1109,7 @@ print(f"Best epoch by macro_F1 : {best_f1_epoch + 1}/{num_epochs}  (val_macro_f1
 _section_times["8. Compile & train"] = time.perf_counter() - _t0
 print(f"\nCompile & train : {_section_times['8. Compile & train']:.1f}s")
 
-model_path = RUN_DIR / "logmel_cnn_v1_1.keras"
+model_path = RUN_DIR / "logmel_cnn_v2.keras"
 model.save(str(model_path))
 np.savez(str(RUN_DIR / "norm_stats.npz"), mu=mu, std=std, genre_classes=np.array(GENRE_CLASSES))
 
@@ -864,7 +1163,7 @@ for axis in (ax_acc, ax_loss, ax_f1):
     for spine in ["top", "right"]:
         axis.spines[spine].set_visible(False)
 
-fig.suptitle("Training history — Log-Mel CNN v1.1")
+fig.suptitle("Training history — Log-Mel CNN v2")
 plt.tight_layout()
 plt.show()
 
@@ -947,12 +1246,64 @@ cm = confusion_matrix(y_test_true, y_test_pred, labels=np.arange(N_CLASSES))
 fig, ax = plt.subplots(figsize=(13, 11))
 disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=GENRE_CLASSES)
 disp.plot(ax=ax, xticks_rotation=45, colorbar=True, cmap="Blues", values_format="d")
-ax.set_title("Confusion matrix — test set (logmel_cnn_v1_1)")
+ax.set_title("Confusion matrix — test set (logmel_cnn_v2)")
 plt.tight_layout()
 plt.show()
 
 _section_times["10. Evaluation"] = time.perf_counter() - _t0
 print(f"Evaluation : {_section_times['10. Evaluation']:.2f}s")
+
+
+def _build_warm_start_comparison() -> dict[str, object]:
+    comparison = {
+        "enabled": PRETRAINED_MODEL_PATH is not None,
+        "mode": PRETRAINED_MODE if PRETRAINED_MODEL_PATH is not None else None,
+        "source_checkpoint": str(PRETRAINED_MODEL_PATH) if PRETRAINED_MODEL_PATH is not None else None,
+        "source_run_report": str(SOURCE_RUN_REPORT_PATH) if SOURCE_RUN_REPORT_PATH is not None else None,
+        "source_run_id": SOURCE_RUN_REPORT.get("run_id") if SOURCE_RUN_REPORT else None,
+        "source_genre_classes": SOURCE_PRETRAINED_GENRES,
+        "class_set_matches_current": WARM_START_CLASS_SET_MATCH,
+        "head_reset_intentional": WARM_START_HEAD_RESET_INTENTIONAL,
+        "transfer_summary": WARM_START_TRANSFER_SUMMARY,
+    }
+    if PRETRAINED_MODEL_PATH is None:
+        return comparison
+
+    source_evaluation = SOURCE_RUN_REPORT.get("evaluation") if SOURCE_RUN_REPORT else None
+    comparison["source_evaluation"] = source_evaluation
+    comparison["new_evaluation"] = {
+        "train": train_metrics,
+        "validation": val_metrics,
+        "test": test_metrics,
+    }
+
+    if not isinstance(source_evaluation, dict):
+        comparison["delta_vs_source"] = None
+        return comparison
+
+    deltas = {}
+    for split_name, new_metrics in {
+        "train": train_metrics,
+        "validation": val_metrics,
+        "test": test_metrics,
+    }.items():
+        source_metrics = source_evaluation.get(split_name)
+        if not isinstance(source_metrics, dict):
+            continue
+        source_macro_f1 = source_metrics.get("macro_f1")
+        source_accuracy = source_metrics.get("accuracy")
+        if source_macro_f1 is None or source_accuracy is None:
+            continue
+        deltas[split_name] = {
+            "source_macro_f1": round(float(source_macro_f1), 4),
+            "new_macro_f1": round(float(new_metrics["macro_f1"]), 4),
+            "delta_macro_f1": round(float(new_metrics["macro_f1"]) - float(source_macro_f1), 4),
+            "source_accuracy": round(float(source_accuracy), 4),
+            "new_accuracy": round(float(new_metrics["accuracy"]), 4),
+            "delta_accuracy": round(float(new_metrics["accuracy"]) - float(source_accuracy), 4),
+        }
+    comparison["delta_vs_source"] = deltas or None
+    return comparison
 
 
 # %% [markdown]
@@ -962,8 +1313,14 @@ print(f"Evaluation : {_section_times['10. Evaluation']:.2f}s")
 _t0 = time.perf_counter()
 
 report = {
-    "run_id": f"logmel-cnn-v1_1-{_run_ts}",
+    "run_id": f"{RUN_FAMILY}-{_run_ts}",
     "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    "initialization": {
+        "mode": INIT_MODE,
+        "pretrained_model": str(PRETRAINED_MODEL_PATH) if PRETRAINED_MODEL_PATH is not None else None,
+        "pretrained_mode": PRETRAINED_MODE if PRETRAINED_MODEL_PATH is not None else None,
+    },
+    "warm_start_comparison": _build_warm_start_comparison(),
     "logmel_dataset_dir": str(LOGMEL_DATASET_DIR),
     "manifests": {
         "train": str(TRAIN_MANIFEST_PATH),
@@ -989,6 +1346,9 @@ report = {
         "epochs_max": EPOCHS,
         "epochs_actual": num_epochs,
         "batch_size": BATCH_SIZE,
+        "freeze_backbone_epochs_requested": FREEZE_BACKBONE_EPOCHS,
+        "freeze_backbone_epochs_applied": APPLIED_FREEZE_BACKBONE_EPOCHS,
+        "training_stages": TRAINING_STAGES,
         "label_smoothing": LABEL_SMOOTHING,
         "weight_decay": WEIGHT_DECAY,
         "mixup_alpha": MIXUP_ALPHA,
@@ -1008,25 +1368,16 @@ report = {
         "validation": val_metrics,
         "test": test_metrics,
     },
-    "changes_from_v1": {
-        "training_control": "val_loss-driven -> val_macro_f1-driven checkpointing and early stopping",
-        "weight_decay": "1e-4 -> 5e-4",
-        "label_smoothing": "0.02 -> 0.0 (disabled because Mixup is enabled)",
-        "spec_aug_freq_mask": "15 -> 24",
-        "spec_aug_time_mask": "25 -> 40",
-        "max_class_weight": "uncapped -> 1.5",
-        "mixup_alpha": "none -> 0.3",
-        "augmentation_order": "normalize -> Mixup -> SpecAugment",
-        "spatial_dropout_blocks_4_5": "none -> 0.12",
-        "final_dropout": "0.20 -> 0.30",
-        "classifier": "GAP->Dropout->Dense(10) -> GAP->Dense(128,relu)->Dropout(0.30)->Dense(10)",
-        "lr_max": "1e-3 -> 5e-4",
-        "warmup_epochs": "3 -> 5",
-        "early_stopping_patience": "9 -> 10",
+    "changes_from_v1_1": {
+        "warm_start_support": "added via LOGMEL_CNN_PRETRAINED_MODEL",
+        "training_behavior": "fresh optimizer/schedule and new RUN_DIR even when initialized from a pretrained .keras model",
+        "compatibility_guardrails": "input shape, output dimension, and genre_classes order are validated before warm-start training",
+        "backbone_only_reset_warning": "prints an explicit warning when backbone_only resets fc_out despite matching class order",
+        "staged_backbone_freezing": "optional via --freeze-backbone-epochs / LOGMEL_CNN_FREEZE_BACKBONE_EPOCHS",
     },
 }
 
-report_path = RUN_DIR / "run_report_logmel_cnn_v1_1.json"
+report_path = RUN_DIR / "run_report_logmel_cnn_v2.json"
 report_path.write_text(json.dumps(report, indent=2))
 print(f"Run report -> {report_path}")
 

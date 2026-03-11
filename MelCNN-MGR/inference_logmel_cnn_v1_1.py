@@ -32,14 +32,21 @@ Usage
     )
     result = engine.predict("path/to/song.mp3")
     print(result.genre, result.confidence)
+
+Used by
+-------
+    - ``MelCNN-MGR/examples/inference_logmel_cnn_v1_1_example.py``
+    - ``MelCNN-MGR/inference_web_service/app.py``
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -50,7 +57,7 @@ import numpy as np
 FFMPEG_AVAILABLE = shutil.which("ffmpeg") is not None
 AUDIO_BACKEND = "ffmpeg" if FFMPEG_AVAILABLE else "librosa"
 
-SAMPLE_RATE = 22_050
+SAMPLE_RATE = 22050
 N_MELS = 192
 N_FFT = 512
 HOP_LENGTH = 256
@@ -288,10 +295,24 @@ class LogMelCNNV11Inference:
         x = self._normalize_logmel(logmel)
         return self.model.predict(x, verbose=0)[0]
 
-    def predict(self, audio_path: str | Path, mode: str = "three_crop") -> PredictionResult:
-        """Predict the genre of an audio file using single- or three-crop inference."""
-        audio_path = Path(audio_path)
-        y = load_audio(audio_path, sr=SAMPLE_RATE, mono=True)
+    def predict_waveform(
+        self,
+        y: np.ndarray,
+        sr: int = SAMPLE_RATE,
+        mode: str = "three_crop",
+        source_name: str = "<waveform>",
+    ) -> PredictionResult:
+        """Predict from an in-memory waveform.
+
+        This is used by streaming or service layers that already have decoded PCM
+        audio and do not want to round-trip through a temporary file.
+        """
+        y = np.asarray(y, dtype=np.float32).reshape(-1)
+        if y.size == 0:
+            raise ValueError("Waveform is empty.")
+
+        if sr != SAMPLE_RATE:
+            y = librosa.resample(y, orig_sr=sr, target_sr=SAMPLE_RATE).astype(np.float32, copy=False)
 
         if mode == "single_crop":
             y_clip = normalize_to_fixed_duration(y, SAMPLE_RATE, CLIP_DURATION)
@@ -299,7 +320,7 @@ class LogMelCNNV11Inference:
             probs = self._predict_logmel(logmel)
             pred_idx = int(np.argmax(probs))
             return PredictionResult(
-                file=str(audio_path),
+                file=source_name,
                 genre=self.genre_classes[pred_idx],
                 confidence=float(probs[pred_idx]),
                 probs=[float(p) for p in probs],
@@ -327,7 +348,7 @@ class LogMelCNNV11Inference:
             )
 
         return PredictionResult(
-            file=str(audio_path),
+            file=source_name,
             genre=self.genre_classes[pred_idx],
             confidence=float(avg_probs[pred_idx]),
             probs=[float(p) for p in avg_probs],
@@ -335,6 +356,12 @@ class LogMelCNNV11Inference:
             mode="three_crop",
             crops=crop_details,
         )
+
+    def predict(self, audio_path: str | Path, mode: str = "three_crop") -> PredictionResult:
+        """Predict the genre of an audio file using single- or three-crop inference."""
+        audio_path = Path(audio_path)
+        y = load_audio(audio_path, sr=SAMPLE_RATE, mono=True)
+        return self.predict_waveform(y, sr=SAMPLE_RATE, mode=mode, source_name=str(audio_path))
 
     def predict_batch(
         self,
@@ -350,3 +377,73 @@ class LogMelCNNV11Inference:
             except Exception as exc:
                 print(f"[WARN] Skipped {path}: {exc}", file=sys.stderr)
         return results
+
+
+def _print_result(result: PredictionResult) -> None:
+    print(f"\n{'-' * 60}")
+    print(f"File      : {Path(result.file).name}")
+    print(f"Predicted : {result.genre} ({result.confidence:.2%})")
+    print(f"Mode      : {result.mode}")
+    if result.crops:
+        for idx, crop in enumerate(result.crops, start=1):
+            print(f"  Crop {idx}: {crop.genre} ({crop.confidence:.2%})")
+    print("Top-3     : ", end="")
+    for genre, prob in result.top_k(3):
+        print(f"{genre} ({prob:.1%})  ", end="")
+    print()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Run direct smoke-test inference with a trained Log-Mel CNN v1.1 model.",
+    )
+    parser.add_argument(
+        "--run-dir",
+        required=True,
+        default=Path("MelCNN-MGR/models/logmel-cnn-demo"),
+        type=Path,
+        help="Training run directory containing .keras files and norm_stats.npz.",
+    )
+    parser.add_argument(
+        "files",
+        nargs="+",
+        default=[Path("audio_demo/Blues-Chris Stapleton-Tennessee Whiskey.mp3"),
+                 Path("audio_demo/Metal-Black Sabbath-Black Sabbath.mp3"),
+                 Path("audio_demo/Hip-Hop-Kendrick Lamar-HUMBLE.mp3")],
+        type=Path,
+        help="One or more audio files to classify.",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["single_crop", "three_crop"],
+        default="three_crop",
+        help="Inference mode to use for all files.",
+    )
+    parser.add_argument(
+        "--final-model",
+        action="store_true",
+        help="Prefer the final saved model over the best macro-F1 checkpoint.",
+    )
+    args = parser.parse_args()
+
+    engine = LogMelCNNV11Inference(args.run_dir, prefer_macro_f1=not args.final_model)
+    print(f"Run dir     : {engine.run_dir}")
+    print(f"Model file  : {engine.model_path.name}")
+    print(f"Backend     : {AUDIO_BACKEND}")
+    print(f"Classes     : {engine.n_classes}")
+
+    failed = 0
+    for audio_path in args.files:
+        try:
+            result = engine.predict(audio_path, mode=args.mode)
+            _print_result(result)
+        except Exception as exc:
+            failed += 1
+            print(f"[ERROR] {audio_path}: {exc}", file=sys.stderr)
+
+    if failed:
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()
