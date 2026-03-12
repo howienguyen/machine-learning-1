@@ -42,7 +42,29 @@ MELCNN_DIR = SCRIPT_DIR.parent
 WORKSPACE = MELCNN_DIR.parent
 
 DEFAULT_MANIFEST_PATH = MELCNN_DIR / "data" / "processed" / "manifest_final_samples.parquet"
-DEFAULT_OUT_ROOT = MELCNN_DIR / "cache" / "logmel_dataset_10s"
+DEFAULT_SETTINGS_PATH = MELCNN_DIR / "settings.json"
+DEFAULT_SAMPLE_LENGTH_SEC = 15.0
+
+
+def load_default_sample_length_from_settings(settings_path: Path) -> float:
+    try:
+        payload = json.loads(settings_path.read_text())
+    except Exception:
+        return DEFAULT_SAMPLE_LENGTH_SEC
+
+    config = payload.get("data_sampling_settings")
+    if not isinstance(config, dict):
+        return DEFAULT_SAMPLE_LENGTH_SEC
+
+    sample_length_sec = config.get("sample_length_sec")
+    if not isinstance(sample_length_sec, (int, float)) or sample_length_sec <= 0:
+        return DEFAULT_SAMPLE_LENGTH_SEC
+
+    return float(sample_length_sec)
+
+DEFAULT_SAMPLE_LENGTH_FROM_SETTINGS = load_default_sample_length_from_settings(DEFAULT_SETTINGS_PATH)
+
+DEFAULT_OUT_ROOT = MELCNN_DIR / "cache" / f"logmel_dataset_{DEFAULT_SAMPLE_LENGTH_FROM_SETTINGS:g}s"
 DEFAULT_NUM_WORKERS = min(4, (os.cpu_count() or 4))
 
 DEFAULT_SAMPLE_RATE = 22050
@@ -634,10 +656,19 @@ def main(argv: list[str] | None = None) -> int:
     logging.info("Manifest: %s", manifest_path)
     logging.info("Output root: %s", out_root)
     logging.info("Audio backend: %s", audio_backend)
+    logging.info(
+        "Default sample length from settings/fallback: %.3fs",
+        DEFAULT_SAMPLE_LENGTH_FROM_SETTINGS,
+    )
 
     manifest = _load_manifest(manifest_path, args.limit)
     target_sec = _resolve_sample_length(manifest, args.sample_length_sec)
     n_frames = int(target_sec * args.sample_rate / args.hop_length)
+    logging.info(
+        "Actual target sample length used for extraction: %.3fs (%s)",
+        target_sec,
+        "cli override" if args.sample_length_sec is not None else "manifest",
+    )
 
     if args.clear_cache and out_root.exists():
         logging.info("Removing existing output root: %s", out_root)

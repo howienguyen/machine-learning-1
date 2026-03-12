@@ -6,8 +6,8 @@
 # - **Mixup augmentation** (α=0.3) — primary regularizer against overfitting
 # - **Mixup before SpecAugment** — follows the intended augmentation order
 # - **Stronger SpecAugment** (freq=24, time=40) — harder partial-info training
-# - **Class-weight capping** (max 1.5) — prevent Metal over-prediction
-# - **More dropout** — SpatialDropout2D in all conv blocks + higher final Dropout
+# - **Adaptive class weights** — only apply them when the train split is meaningfully imbalanced
+# - **Moderate dropout** — keep dropout, but avoid over-regularizing a balanced dataset
 # - **Higher weight decay** (5e-4) — stronger L2 regularisation
 # - **Dense bottleneck** before output — better feature disentangling
 # - **Lower LR** (5e-4) and **longer warmup** (5 epochs) — stability
@@ -97,11 +97,33 @@ WORKSPACE = MELCNN_DIR.parent
 PROCESSED_DIR = MELCNN_DIR / "data" / "processed"
 CACHE_DIR = MELCNN_DIR / "cache"
 MODELS_BASE_DIR = MELCNN_DIR / "models"
+SETTINGS_PATH = MELCNN_DIR / "settings.json"
+DEFAULT_SAMPLE_LENGTH_SEC = 15.0
+
+
+def load_default_sample_length_from_settings(settings_path: Path) -> float:
+    try:
+        payload = json.loads(settings_path.read_text())
+    except Exception:
+        return DEFAULT_SAMPLE_LENGTH_SEC
+
+    config = payload.get("data_sampling_settings")
+    if not isinstance(config, dict):
+        return DEFAULT_SAMPLE_LENGTH_SEC
+
+    sample_length_sec = config.get("sample_length_sec")
+    if not isinstance(sample_length_sec, (int, float)) or sample_length_sec <= 0:
+        return DEFAULT_SAMPLE_LENGTH_SEC
+
+    return float(sample_length_sec)
+
+
+DEFAULT_LOGMEL_SAMPLE_LENGTH_SEC = load_default_sample_length_from_settings(SETTINGS_PATH)
 
 LOGMEL_DATASET_DIR = Path(
     os.environ.get(
         "LOGMEL_DATASET_DIR",
-        str(CACHE_DIR / "logmel_dataset_10s"),
+        str(CACHE_DIR / f"logmel_dataset_{DEFAULT_LOGMEL_SAMPLE_LENGTH_SEC:g}s"),
     )
 )
 TRAIN_MANIFEST_PATH = LOGMEL_DATASET_DIR / "logmel_manifest_train.parquet"
@@ -123,6 +145,12 @@ SPEC_AUG_NUM_MASKS = 2
 
 MAX_CLASS_WEIGHT = 1.5             # v1.1: cap class weights to prevent over-prediction
 MIXUP_ALPHA = 0.3                  # v1.1: Mixup blending parameter (Beta distribution)
+CLASS_WEIGHT_IMBALANCE_THRESHOLD = 1.05
+SPATIAL_DROPOUT_RATE_BLOCK2 = 0.10
+SPATIAL_DROPOUT_RATE_BLOCK3 = 0.10
+SPATIAL_DROPOUT_RATE_BLOCK4 = 0.10
+SPATIAL_DROPOUT_RATE_BLOCK5 = 0.10
+FINAL_DROPOUT_RATE = 0.25
 
 PRETRAINED_MODEL_ENV = os.environ.get("LOGMEL_CNN_PRETRAINED_MODEL", "").strip()
 PRETRAINED_MODEL_RAW = (CLI_ARGS.pretrained_model or PRETRAINED_MODEL_ENV).strip()
@@ -432,28 +460,52 @@ val_df["label_int"] = label_enc.transform(val_df["genre_top"].to_numpy())
 test_df["label_int"] = label_enc.transform(test_df["genre_top"].to_numpy())
 
 train_labels = train_df["label_int"].to_numpy()
+train_class_counts = train_df["label_int"].value_counts().reindex(range(N_CLASSES), fill_value=0).astype(int)
 present_train_classes = np.unique(train_labels)
-raw_class_weights = compute_class_weight(
-    class_weight="balanced",
-    classes=present_train_classes,
-    y=train_labels,
-)
-# v1.1: Cap extreme weights to MAX_CLASS_WEIGHT
-capped_class_weights = np.minimum(raw_class_weights, MAX_CLASS_WEIGHT)
-class_weight_dict = {
-    int(class_id): float(weight)
-    for class_id, weight in zip(present_train_classes, capped_class_weights)
-}
 missing_train_class_ids = sorted(set(range(N_CLASSES)) - set(present_train_classes.tolist()))
+present_train_counts = train_class_counts[train_class_counts > 0]
+train_class_balance_ratio = (
+    float(present_train_counts.max() / present_train_counts.min())
+    if not present_train_counts.empty
+    else float("inf")
+)
+USE_CLASS_WEIGHTS = train_class_balance_ratio > CLASS_WEIGHT_IMBALANCE_THRESHOLD
 
-print(f"Class weights (capped at {MAX_CLASS_WEIGHT}):")
+if USE_CLASS_WEIGHTS:
+    raw_class_weights = compute_class_weight(
+        class_weight="balanced",
+        classes=present_train_classes,
+        y=train_labels,
+    )
+    capped_class_weights = np.minimum(raw_class_weights, MAX_CLASS_WEIGHT)
+    class_weight_dict = {
+        int(class_id): float(weight)
+        for class_id, weight in zip(present_train_classes, capped_class_weights)
+    }
+else:
+    raw_class_weights = np.ones(len(present_train_classes), dtype=np.float32)
+    capped_class_weights = raw_class_weights.copy()
+    class_weight_dict = {int(class_id): 1.0 for class_id in present_train_classes}
+
+print("Train split counts by genre:")
 for i, genre in enumerate(GENRE_CLASSES):
-    if i in class_weight_dict:
-        raw_w = float(raw_class_weights[list(present_train_classes).index(i)]) if i in present_train_classes else 0.0
-        capped = " (capped)" if raw_w > MAX_CLASS_WEIGHT else ""
-        print(f"  {genre:<20s}  {class_weight_dict[i]:.4f}{capped}  (raw: {raw_w:.4f})")
-    else:
-        print(f"  {genre:<20s}  absent in train -> no class weight applied")
+    print(f"  {genre:<20s}  {int(train_class_counts.iloc[i]):>5d}")
+print(
+    f"Train class balance ratio (max/min among present classes): {train_class_balance_ratio:.4f} "
+    f"| class weights enabled: {USE_CLASS_WEIGHTS}"
+)
+
+if USE_CLASS_WEIGHTS:
+    print(f"Class weights (capped at {MAX_CLASS_WEIGHT}):")
+    for i, genre in enumerate(GENRE_CLASSES):
+        if i in class_weight_dict:
+            raw_w = float(raw_class_weights[list(present_train_classes).index(i)]) if i in present_train_classes else 0.0
+            capped = " (capped)" if raw_w > MAX_CLASS_WEIGHT else ""
+            print(f"  {genre:<20s}  {class_weight_dict[i]:.4f}{capped}  (raw: {raw_w:.4f})")
+        else:
+            print(f"  {genre:<20s}  absent in train -> no class weight applied")
+else:
+    print("Class weights disabled because the train split is already effectively balanced.")
 
 if missing_train_class_ids:
     missing_train_genres = [GENRE_CLASSES[i] for i in missing_train_class_ids]
@@ -602,13 +654,14 @@ def make_dataset(index_df: pd.DataFrame, batch_size: int, shuffle: bool, augment
 
 
 train_ds = make_dataset(train_df, BATCH_SIZE, shuffle=True, augment=True)
-train_fit_ds = train_ds.map(attach_class_weights, num_parallel_calls=AUTOTUNE).prefetch(AUTOTUNE)
+train_fit_ds = train_ds.map(attach_class_weights, num_parallel_calls=AUTOTUNE).prefetch(AUTOTUNE) if USE_CLASS_WEIGHTS else train_ds
 train_eval_ds = make_dataset(train_df, BATCH_SIZE, shuffle=False, augment=False)
 val_ds = make_dataset(val_df, BATCH_SIZE, shuffle=False, augment=False)
 test_ds = make_dataset(test_df, BATCH_SIZE, shuffle=False, augment=False)
 
 print("\nDatasets ready:")
 print(f"  train batches: {tf.data.experimental.cardinality(train_ds).numpy()}  (SpecAugment=ON, Mixup=ON)")
+print(f"  train fit     : class_weights={'ON' if USE_CLASS_WEIGHTS else 'OFF'}")
 print(f"  train eval    : {tf.data.experimental.cardinality(train_eval_ds).numpy()}  (SpecAugment=OFF, Mixup=OFF)")
 print(f"  val   batches: {tf.data.experimental.cardinality(val_ds).numpy()}  (SpecAugment=OFF, Mixup=OFF)")
 print(f"  test  batches: {tf.data.experimental.cardinality(test_ds).numpy()}  (SpecAugment=OFF, Mixup=OFF)")
@@ -637,34 +690,34 @@ def build_model(n_classes: int) -> keras.Model:
     x = layers.Conv2D(64, (3, 3), padding="same", use_bias=False, name="conv2")(x)
     x = layers.BatchNormalization(name="bn2")(x)
     x = layers.ReLU(name="relu2")(x)
-    x = layers.SpatialDropout2D(0.10, name="sdrop2")(x)
+    x = layers.SpatialDropout2D(SPATIAL_DROPOUT_RATE_BLOCK2, name="sdrop2")(x)
     x = layers.MaxPool2D((2, 2), name="pool2")(x)
 
     # Block 3: 128 filters, 3×3
     x = layers.Conv2D(128, (3, 3), padding="same", use_bias=False, name="conv3")(x)
     x = layers.BatchNormalization(name="bn3")(x)
     x = layers.ReLU(name="relu3")(x)
-    x = layers.SpatialDropout2D(0.10, name="sdrop3")(x)
+    x = layers.SpatialDropout2D(SPATIAL_DROPOUT_RATE_BLOCK3, name="sdrop3")(x)
     x = layers.MaxPool2D((2, 2), name="pool3")(x)
 
-    # Block 4: 256 filters — v1.1: added SpatialDropout2D(0.12)
+    # Block 4: 256 filters — keep moderate spatial dropout in later blocks
     x = layers.Conv2D(256, (3, 3), padding="same", use_bias=False, name="conv4")(x)
     x = layers.BatchNormalization(name="bn4")(x)
     x = layers.ReLU(name="relu4")(x)
-    x = layers.SpatialDropout2D(0.12, name="sdrop4")(x)
+    x = layers.SpatialDropout2D(SPATIAL_DROPOUT_RATE_BLOCK4, name="sdrop4")(x)
     x = layers.MaxPool2D((2, 2), name="pool4")(x)
 
-    # Block 5: 256 filters — v1.1: added SpatialDropout2D(0.12)
+    # Block 5: 256 filters — keep moderate spatial dropout in later blocks
     x = layers.Conv2D(256, (3, 3), padding="same", use_bias=False, name="conv5")(x)
     x = layers.BatchNormalization(name="bn5")(x)
     x = layers.ReLU(name="relu5")(x)
-    x = layers.SpatialDropout2D(0.12, name="sdrop5")(x)
+    x = layers.SpatialDropout2D(SPATIAL_DROPOUT_RATE_BLOCK5, name="sdrop5")(x)
     x = layers.MaxPool2D((2, 2), name="pool5")(x)
 
-    # Classifier head — v1.1: Dense(128) bottleneck + higher Dropout(0.30)
+    # Classifier head — keep a moderate dropout level to avoid underfitting
     x = layers.GlobalAveragePooling2D(name="gap")(x)
     x = layers.Dense(128, activation="relu", name="fc_bottleneck")(x)
-    x = layers.Dropout(0.30, name="dropout")(x)
+    x = layers.Dropout(FINAL_DROPOUT_RATE, name="dropout")(x)
     outputs = layers.Dense(n_classes, activation="softmax", name="fc_out")(x)
     return keras.Model(inputs, outputs, name="logmel_cnn_v2")
 
@@ -996,7 +1049,7 @@ def make_training_callbacks(enable_checkpointing: bool, enable_early_stopping: b
             tf.keras.callbacks.EarlyStopping(
                 monitor="val_macro_f1",
                 mode="max",
-                patience=12,
+                patience=10,
                 restore_best_weights=False,
                 verbose=1,
             )
@@ -1354,7 +1407,14 @@ report = {
         "mixup_alpha": MIXUP_ALPHA,
         "spec_aug_freq_mask": SPEC_AUG_FREQ_MASK,
         "spec_aug_time_mask": SPEC_AUG_TIME_MASK,
+        "class_weights_enabled": USE_CLASS_WEIGHTS,
+        "class_weight_balance_ratio": round(float(train_class_balance_ratio), 4),
         "max_class_weight": MAX_CLASS_WEIGHT,
+        "spatial_dropout_block2": SPATIAL_DROPOUT_RATE_BLOCK2,
+        "spatial_dropout_block3": SPATIAL_DROPOUT_RATE_BLOCK3,
+        "spatial_dropout_block4": SPATIAL_DROPOUT_RATE_BLOCK4,
+        "spatial_dropout_block5": SPATIAL_DROPOUT_RATE_BLOCK5,
+        "final_dropout": FINAL_DROPOUT_RATE,
         "warmup_epochs": WARMUP_EPOCHS,
         "lr_max": LR_MAX,
         "best_epoch_val_loss": best_loss_epoch + 1,

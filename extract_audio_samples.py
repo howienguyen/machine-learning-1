@@ -1,0 +1,489 @@
+"""Extract fixed-length audio segments from genre_downloads.
+
+README-style usage example:
+
+    python extract_mtg_processed_samples.py \
+        --input-dir genre_downloads \
+        --output-dir mtg-processed-samples \
+        --segment-seconds 11 \
+        --max-num-segments 3 \
+        --min-duration-seconds 30 \
+        --edge-buffer-seconds 20
+
+Segment count selection per eligible file:
+    - duration <= min-duration-seconds: skipped
+    - min-duration-seconds < duration <= 30s: extract 1 segment
+    - 30s < duration <= 60s: extract 2 segments when max-num-segments > 1
+    - duration > 60s: extract up to max-num-segments segments
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import shutil
+import subprocess
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from pathlib import Path
+
+import numpy as np
+import soundfile as sf
+
+
+DEFAULT_INPUT_DIR = Path("genre_downloads/mtg-jamendo")
+DEFAULT_OUTPUT_DIR = Path("genre_downloads/cropped-audio/mtg-jamendo")
+SUPPORTED_EXTENSIONS = {".mp3", ".wav"}
+_FFMPEG = shutil.which("ffmpeg")
+_FFPROBE = shutil.which("ffprobe")
+_librosa_module = None
+
+
+def _get_librosa():
+    global _librosa_module
+    if _librosa_module is None:
+        import librosa
+
+        _librosa_module = librosa
+    return _librosa_module
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Extract fixed-length samples from eligible audio files in genre_downloads "
+            "subfolders, using per-file duration rules to reduce the number of segments "
+            "for shorter clips."
+        )
+    )
+    parser.add_argument(
+        "--input-dir",
+        type=Path,
+        default=DEFAULT_INPUT_DIR,
+        help="Input root containing per-genre subfolders with mp3/wav files.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=DEFAULT_OUTPUT_DIR,
+        help="Output root where extracted wav segments are written in mirrored subfolders.",
+    )
+    parser.add_argument(
+        "--segment-seconds",
+        type=float,
+        default=31.0,
+        help="Length of each extracted segment in seconds.",
+    )
+    parser.add_argument(
+        "--max-num-segments",
+        type=int,
+        default=3,
+        help=(
+            "Maximum number of segments to extract from a single file. "
+            "Files longer than min-duration-seconds but <= 30s use 1 segment; "
+            "files > 30s and <= 60s use 2 segments when this value is greater than 1."
+        ),
+    )
+    parser.add_argument(
+        "--min-duration-seconds",
+        type=float,
+        default=31.0,
+        help="Skip files with duration less than or equal to this threshold.",
+    )
+    parser.add_argument(
+        "--edge-buffer-seconds",
+        type=float,
+        default=20.0,
+        help="Preferred buffer to avoid at the beginning and end when placing segment start times.",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing output segment files if they already exist.",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=["ffmpeg", "librosa"],
+        default="ffmpeg",
+        help=(
+            "Audio extraction backend. Defaults to ffmpeg when ffmpeg/ffprobe are available; "
+            "otherwise falls back to librosa."
+        ),
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=3,
+        help=(
+            "Number of worker processes used to handle top-level subfolders in parallel. "
+            "Use 1 to disable multiprocessing."
+        ),
+    )
+    return parser.parse_args()
+
+
+def find_input_subdirs(input_dir: Path) -> list[Path]:
+    return [child for child in sorted(input_dir.iterdir()) if child.is_dir()]
+
+
+def find_audio_files(input_dir: Path) -> list[Path]:
+    audio_files: list[Path] = []
+
+    for child in find_input_subdirs(input_dir):
+        for path in sorted(child.rglob("*")):
+            if path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS:
+                audio_files.append(path)
+
+    return audio_files
+
+
+def find_audio_files_in_subdir(folder: Path) -> list[Path]:
+    return [path for path in sorted(folder.rglob("*")) if path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS]
+
+
+def choose_start_times(
+    duration_seconds: float,
+    segment_seconds: float,
+    num_segments: int,
+    edge_buffer_seconds: float,
+) -> list[float]:
+    if duration_seconds < segment_seconds or num_segments < 1:
+        return []
+
+    max_start = duration_seconds - segment_seconds
+    if max_start <= 0:
+        return [0.0]
+
+    if duration_seconds >= segment_seconds + (2.0 * edge_buffer_seconds):
+        start_min = edge_buffer_seconds
+        start_max = duration_seconds - edge_buffer_seconds - segment_seconds
+    else:
+        start_min = 0.0
+        start_max = max_start
+
+    if start_max < start_min:
+        start_min = 0.0
+        start_max = max_start
+
+    if num_segments == 1:
+        return [start_min]
+
+    return np.linspace(start_min, start_max, num=num_segments).tolist()
+
+
+def choose_num_segments(duration_seconds: float, max_num_segments: int) -> int:
+    if max_num_segments <= 1:
+        return max_num_segments
+
+    if duration_seconds <= 30.0:
+        return 1
+
+    if duration_seconds <= 60.0:
+        return 2
+
+    return max_num_segments
+
+
+def resolve_backend(requested_backend: str | None) -> str:
+    if requested_backend == "ffmpeg":
+        if not _FFMPEG or not _FFPROBE:
+            raise RuntimeError(
+                "ffmpeg backend requested, but ffmpeg and/or ffprobe are not available on PATH."
+            )
+        return "ffmpeg"
+
+    if requested_backend == "librosa":
+        _get_librosa()
+        return "librosa"
+
+    if _FFMPEG and _FFPROBE:
+        return "ffmpeg"
+
+    print("[WARN] ffmpeg/ffprobe not found on PATH; falling back to librosa backend.")
+    _get_librosa()
+    return "librosa"
+
+
+def probe_duration_ffprobe(path: Path) -> float:
+    if not _FFPROBE:
+        raise RuntimeError("ffprobe is not available on PATH.")
+
+    cmd = [
+        _FFPROBE,
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=30)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "ffprobe failed to read duration")
+
+    text = result.stdout.strip()
+    if not text:
+        raise RuntimeError("ffprobe returned an empty duration value")
+
+    return float(text)
+
+
+def extract_segment_ffmpeg(
+    input_path: Path,
+    output_path: Path,
+    start_seconds: float,
+    segment_seconds: float,
+    overwrite: bool,
+) -> None:
+    if not _FFMPEG:
+        raise RuntimeError("ffmpeg is not available on PATH.")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        _FFMPEG,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y" if overwrite else "-n",
+        "-i",
+        str(input_path),
+        "-ss",
+        f"{start_seconds:.6f}",
+        "-t",
+        f"{segment_seconds:.6f}",
+        "-vn",
+        "-acodec",
+        "pcm_s16le",
+        str(output_path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=120)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "ffmpeg failed to extract audio segment")
+
+
+def slice_audio(
+    waveform: np.ndarray,
+    sample_rate: int,
+    start_seconds: float,
+    segment_seconds: float,
+) -> np.ndarray:
+    start_sample = int(round(start_seconds * sample_rate))
+    segment_samples = int(round(segment_seconds * sample_rate))
+    end_sample = start_sample + segment_samples
+
+    if waveform.ndim == 1:
+        return waveform[start_sample:end_sample]
+
+    return waveform[:, start_sample:end_sample]
+
+
+def write_audio(path: Path, waveform: np.ndarray, sample_rate: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    if waveform.ndim == 1:
+        sf.write(path, waveform, sample_rate)
+        return
+
+    sf.write(path, waveform.T, sample_rate)
+
+
+def process_subfolder(
+    subdir: Path,
+    input_dir: Path,
+    output_dir: Path,
+    backend: str,
+    segment_seconds: float,
+    max_num_segments: int,
+    min_duration_seconds: float,
+    edge_buffer_seconds: float,
+    overwrite: bool,
+) -> dict[str, int]:
+    audio_files = find_audio_files_in_subdir(subdir)
+    processed_files = 0
+    skipped_short = 0
+    failed_files = 0
+    written_segments = 0
+
+    print(f"[worker:{subdir.name}] audio_files_found={len(audio_files)}", flush=True)
+
+    for audio_path in audio_files:
+        try:
+            if backend == "ffmpeg":
+                duration_seconds = probe_duration_ffprobe(audio_path)
+                waveform = None
+                sample_rate = None
+            else:
+                librosa = _get_librosa()
+                waveform, sample_rate = librosa.load(str(audio_path), sr=None, mono=False)
+                waveform = np.asarray(waveform, dtype=np.float32)
+                duration_seconds = waveform.shape[-1] / float(sample_rate)
+
+            if duration_seconds <= min_duration_seconds:
+                skipped_short += 1
+                print(
+                    f"SKIP short: {audio_path} ({duration_seconds:.2f}s <= {min_duration_seconds:.2f}s)",
+                    flush=True,
+                )
+                continue
+
+            num_segments = choose_num_segments(
+                duration_seconds=duration_seconds,
+                max_num_segments=max_num_segments,
+            )
+
+            start_times = choose_start_times(
+                duration_seconds=duration_seconds,
+                segment_seconds=segment_seconds,
+                num_segments=num_segments,
+                edge_buffer_seconds=edge_buffer_seconds,
+            )
+            if len(start_times) != num_segments:
+                failed_files += 1
+                print(f"FAIL start-time generation: {audio_path}", flush=True)
+                continue
+
+            relative_parent = audio_path.parent.relative_to(input_dir)
+            output_parent = output_dir / relative_parent
+
+            for index, start_seconds in enumerate(start_times, start=1):
+                output_name = f"{audio_path.stem}__seg{index:02d}_start{start_seconds:06.2f}s.wav"
+                output_path = output_parent / output_name
+
+                if output_path.exists() and not overwrite:
+                    continue
+
+                if backend == "ffmpeg":
+                    extract_segment_ffmpeg(
+                        input_path=audio_path,
+                        output_path=output_path,
+                        start_seconds=start_seconds,
+                        segment_seconds=segment_seconds,
+                        overwrite=overwrite,
+                    )
+                else:
+                    segment = slice_audio(
+                        waveform=waveform,
+                        sample_rate=sample_rate,
+                        start_seconds=start_seconds,
+                        segment_seconds=segment_seconds,
+                    )
+
+                    expected_samples = int(round(segment_seconds * sample_rate))
+                    if segment.shape[-1] < expected_samples:
+                        failed_files += 1
+                        print(
+                            f"FAIL short slice: {audio_path} seg{index:02d} got {segment.shape[-1]} samples, "
+                            f"expected {expected_samples}",
+                            flush=True,
+                        )
+                        continue
+
+                    write_audio(output_path, segment, sample_rate)
+                written_segments += 1
+
+            processed_files += 1
+            print(
+                f"OK: {audio_path} -> {num_segments} segment(s) at {[round(value, 2) for value in start_times]}",
+                flush=True,
+            )
+
+        except Exception as exc:
+            failed_files += 1
+            print(f"FAIL: {audio_path} ({exc})", flush=True)
+
+    return {
+        "audio_files_found": len(audio_files),
+        "processed_files": processed_files,
+        "skipped_short": skipped_short,
+        "failed_files": failed_files,
+        "written_segments": written_segments,
+    }
+
+
+def main() -> None:
+    args = parse_args()
+    backend = resolve_backend(args.backend)
+
+    input_dir = args.input_dir.resolve()
+    output_dir = args.output_dir.resolve()
+
+    if not input_dir.exists():
+        raise FileNotFoundError(f"Input directory does not exist: {input_dir}")
+
+    subdirs = find_input_subdirs(input_dir)
+    audio_files = find_audio_files(input_dir)
+    if not subdirs or not audio_files:
+        print(f"No mp3/wav files found in subfolders of {input_dir}")
+        return
+
+    print(f"backend: {backend}")
+    requested_workers = max(1, args.num_workers)
+    max_workers = min(requested_workers, len(subdirs), os.cpu_count() or 1)
+    print(f"num_workers: {max_workers}")
+
+    processed_files = 0
+    skipped_short = 0
+    failed_files = 0
+    written_segments = 0
+
+    if max_workers == 1:
+        for subdir in subdirs:
+            result = process_subfolder(
+                subdir=subdir,
+                input_dir=input_dir,
+                output_dir=output_dir,
+                backend=backend,
+                segment_seconds=args.segment_seconds,
+                max_num_segments=args.max_num_segments,
+                min_duration_seconds=args.min_duration_seconds,
+                edge_buffer_seconds=args.edge_buffer_seconds,
+                overwrite=args.overwrite,
+            )
+            processed_files += result["processed_files"]
+            skipped_short += result["skipped_short"]
+            failed_files += result["failed_files"]
+            written_segments += result["written_segments"]
+    else:
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    process_subfolder,
+                    subdir,
+                    input_dir,
+                    output_dir,
+                    backend,
+                    args.segment_seconds,
+                    args.max_num_segments,
+                    args.min_duration_seconds,
+                    args.edge_buffer_seconds,
+                    args.overwrite,
+                ): subdir
+                for subdir in subdirs
+            }
+
+            for future in as_completed(futures):
+                subdir = futures[future]
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    failed_files += len(find_audio_files_in_subdir(subdir))
+                    print(f"FAIL worker: {subdir} ({exc})")
+                    continue
+
+                processed_files += result["processed_files"]
+                skipped_short += result["skipped_short"]
+                failed_files += result["failed_files"]
+                written_segments += result["written_segments"]
+
+    print("\nSummary")
+    print(f"input_dir: {input_dir}")
+    print(f"output_dir: {output_dir}")
+    print(f"audio_files_found: {len(audio_files)}")
+    print(f"processed_files: {processed_files}")
+    print(f"skipped_short: {skipped_short}")
+    print(f"failed_files: {failed_files}")
+    print(f"written_segments: {written_segments}")
+
+
+if __name__ == "__main__":
+    main()

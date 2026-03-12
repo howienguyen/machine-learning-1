@@ -12,10 +12,10 @@
 			"Country",
 			"Blues"
 		],
-		"number_of_samples_expected_each_genre": 1400,
+		"number_of_samples_expected_each_genre": 1900,
 		"additional_samples_contribution_ratio_expected_each_genre": 0.5,
         "train_n_val_test_split_ratio_each_genre": 0.7,
-		"sample_length_sec": 10,
+		"sample_length_sec": 15,
 		"min_duration_delta": 0.001
 	}
 }

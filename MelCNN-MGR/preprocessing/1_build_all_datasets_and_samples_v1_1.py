@@ -2,33 +2,81 @@
 """Build file-level and sample-level manifests across all supported datasets.
 
 Outputs written to MelCNN-MGR/data/processed by default:
-    manifest_all_datasets.parquet  one row per discovered audio file candidate
-    manifest_all_samples.parquet   one row per fixed-length sample segment
-    manifest_final_samples.parquet selected sample segments with final split labels
+    manifest_fma_datasets.parquet         one row per discovered FMA audio file candidate
+    manifest_additional_datasets.parquet  one row per discovered additional-dataset audio file candidate
+    manifest_fma_all_samples.parquet      one row per fixed-length FMA sample segment
+    manifest_additional_all_samples.parquet one row per fixed-length additional-dataset sample segment
+    manifest_final_samples.parquet        selected sample segments with final split labels
 
 Logical pipeline stages:
-    Stage 1a: generate or incrementally upsert manifest_all_datasets.parquet
-              from one or more selected source families
-    Stage 1b: generate manifest_all_samples.parquet from manifest_all_datasets.parquet
-    Stage 2:  generate manifest_final_samples.parquet from the Stage 1b sample rows
-              for downstream model-training consumers
+    Stage 1a: generate manifest_fma_datasets.parquet and/or
+              manifest_additional_datasets.parquet from selected source families
+    Stage 1b: generate manifest_fma_all_samples.parquet and/or
+              manifest_additional_all_samples.parquet from the corresponding
+              Stage 1a dataset manifests
+    Stage 2:  generate manifest_final_samples.parquet by combining both Stage 1b
+              sample manifests for downstream model-training consumers
 
 The CLI can execute Stage 1a only, Stage 1b only, Stage 1a+1b, Stage 2 only,
 or the full pipeline in one run.
 The parquet outputs define a natural boundary between intermediate manifest
 generation and final training-manifest selection.
 
-Stage 1a source-selection modes
--------------------------------
-Stage 1a can build from:
+Example commands
+----------------
+Run Stage 1a for FMA only:
+
+    python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py \
+        --mode stage1a \
+        --stage1a-sources fma
+
+Run Stage 1a for additional datasets only:
+
+    python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py \
+        --mode stage1a \
+        --stage1a-sources additional
+
+Run Stage 1b for FMA only:
+
+    python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py \
+        --mode stage1b \
+        --stage1b-sources fma
+
+Run Stage 1b for additional datasets only:
+
+    python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py \
+        --mode stage1b \
+        --stage1b-sources additional
+
+Run Stage 1b for both sources:
+
+    python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py \
+        --mode stage1b \
+        --stage1b-sources both
+
+Run Stage 2 from the existing per-source sample manifests:
+
+    python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py \
+        --mode stage2
+
+Run the full pipeline in one command:
+
+    python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py \
+        --mode both \
+        --stage1a-sources both \
+        --stage1b-sources both
+
+Selected output parquet files are overwritten on rerun.
+
+Stage 1a and Stage 1b source-selection modes
+--------------------------------------------
+Both stages can build from:
 
     fma
     additional
     both
 
-When manifest_all_datasets.parquet already exists, Stage 1a performs an upsert
-by artifact_id: incoming rows replace existing rows with the same artifact_id,
-and previously stored rows from other sources remain in place.
+Each selected parquet is rebuilt from scratch and overwritten on rerun.
 
 The script uses settings.data_sampling_settings in MelCNN-MGR/settings.json:
     target_genres
@@ -40,9 +88,9 @@ For each eligible audio file, the number of segments is:
 
     floor(duration_s / sample_length_sec)
 
-Files shorter than sample_length_sec remain in manifest_all_datasets.parquet
-with sampling_eligible=False, but they do not produce rows in
-manifest_all_samples.parquet.
+Files shorter than sample_length_sec remain in their source-specific dataset
+manifest with sampling_eligible=False, but they do not produce rows in the
+corresponding source-specific sample manifest.
 """
 
 from __future__ import annotations
@@ -70,8 +118,10 @@ DEFAULT_SETTINGS_PATH = _MELCNN_DIR / "settings.json"
 DEFAULT_PROCESSED_DIR = _MELCNN_DIR / "data" / "processed"
 DEFAULT_MEDIUM_MANIFEST = DEFAULT_PROCESSED_DIR / "metadata_manifest_medium.parquet"
 DEFAULT_ADDITIONAL_ROOT = _WORKSPACE / "additional_datasets" / "data"
-DEFAULT_ALL_DATASETS_PATH = DEFAULT_PROCESSED_DIR / "manifest_all_datasets.parquet"
-DEFAULT_ALL_SAMPLES_PATH = DEFAULT_PROCESSED_DIR / "manifest_all_samples.parquet"
+DEFAULT_FMA_DATASETS_PATH = DEFAULT_PROCESSED_DIR / "manifest_fma_datasets.parquet"
+DEFAULT_ADDITIONAL_DATASETS_PATH = DEFAULT_PROCESSED_DIR / "manifest_additional_datasets.parquet"
+DEFAULT_FMA_ALL_SAMPLES_PATH = DEFAULT_PROCESSED_DIR / "manifest_fma_all_samples.parquet"
+DEFAULT_ADDITIONAL_ALL_SAMPLES_PATH = DEFAULT_PROCESSED_DIR / "manifest_additional_all_samples.parquet"
 DEFAULT_FINAL_SAMPLES_PATH = DEFAULT_PROCESSED_DIR / "manifest_final_samples.parquet"
 
 _AUDIO_EXTENSIONS = {".mp3", ".wav", ".flac", ".ogg", ".aif", ".aiff", ".au", ".m4a"}
@@ -83,12 +133,18 @@ _DATASET_MANIFEST_COLUMNS = [
     "reason_code", "sampling_eligible", "sampling_num_segments",
     "sampling_exclusion_reason", "manifest_origin",
 ]
+_SAMPLE_MANIFEST_COLUMNS = [
+    "sample_id", "source", "genre_top", "filepath", "track_id", "sample_length_sec",
+    "segment_index", "segment_start_sec", "segment_end_sec", "total_segments_from_audio",
+    "duration_s", "actual_duration_s", "reason_code",
+]
 
 # ── FMA-specific constants (ported from build_manifest.py) ────────────────────
 DEFAULT_FMA_METADATA_ROOT = _WORKSPACE / "FMA" / "fma_metadata"
 DEFAULT_FMA_AUDIO_ROOT = _WORKSPACE / "FMA" / "fma_medium"
 DEFAULT_FMA_SUBSET = "medium"
 DEFAULT_MIN_DURATION_DELTA = 0.001
+DEFAULT_SAMPLE_LENGTH_SEC = 15.0
 DEFAULT_NUMBER_OF_SAMPLES_EXPECTED_EACH_GENRE = 1300
 DEFAULT_ADDITIONAL_SAMPLES_CONTRIBUTION_RATIO_EACH_GENRE = 0.0
 DEFAULT_TRAIN_RATIO_EACH_GENRE = 0.8
@@ -146,7 +202,7 @@ def derive_default_min_duration(sample_length_sec: float, min_duration_delta: fl
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Build all-datasets, all-samples, and final-samples manifests.",
+        description="Build per-source dataset manifests, per-source sample manifests, and the final samples manifest.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
@@ -159,7 +215,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--stage1a-sources",
         default="both",
         choices=["fma", "additional", "both"],
-        help="Source family selection for Stage 1a dataset-manifest updates.",
+        help="Source family selection for Stage 1a dataset-manifest rebuilds.",
+    )
+    parser.add_argument(
+        "--stage1b-sources",
+        default="both",
+        choices=["fma", "additional", "both"],
+        help="Source family selection for Stage 1b sample-manifest rebuilds.",
     )
     parser.add_argument(
         "--settings",
@@ -205,14 +267,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Path to additional_datasets/data.",
     )
     parser.add_argument(
-        "--all-datasets-out",
-        default=str(DEFAULT_ALL_DATASETS_PATH),
-        help="Output path for manifest_all_datasets.parquet.",
+        "--fma-datasets-out",
+        default=str(DEFAULT_FMA_DATASETS_PATH),
+        help="Output path for manifest_fma_datasets.parquet.",
     )
     parser.add_argument(
-        "--all-samples-out",
-        default=str(DEFAULT_ALL_SAMPLES_PATH),
-        help="Output path for manifest_all_samples.parquet.",
+        "--additional-datasets-out",
+        default=str(DEFAULT_ADDITIONAL_DATASETS_PATH),
+        help="Output path for manifest_additional_datasets.parquet.",
+    )
+    parser.add_argument(
+        "--fma-all-samples-out",
+        default=str(DEFAULT_FMA_ALL_SAMPLES_PATH),
+        help="Output path for manifest_fma_all_samples.parquet.",
+    )
+    parser.add_argument(
+        "--additional-all-samples-out",
+        default=str(DEFAULT_ADDITIONAL_ALL_SAMPLES_PATH),
+        help="Output path for manifest_additional_all_samples.parquet.",
     )
     parser.add_argument(
         "--final-samples-out",
@@ -264,11 +336,13 @@ def load_data_sampling_settings(path: Path) -> dict[str, object]:
             f"Expected non-empty string list at settings.data_sampling_settings.target_genres in {path}"
         )
 
-    sample_length_sec = config.get("sample_length_sec")
-    if not isinstance(sample_length_sec, (int, float)) or sample_length_sec <= 0:
-        raise ValueError(
-            f"Expected positive number at settings.data_sampling_settings.sample_length_sec in {path}"
-        )
+    sample_length_sec_raw = config.get("sample_length_sec")
+    sample_length_fallback_used = False
+    if isinstance(sample_length_sec_raw, (int, float)) and sample_length_sec_raw > 0:
+        sample_length_sec = float(sample_length_sec_raw)
+    else:
+        sample_length_sec = DEFAULT_SAMPLE_LENGTH_SEC
+        sample_length_fallback_used = True
 
     min_duration_delta = config.get("min_duration_delta", DEFAULT_MIN_DURATION_DELTA)
     if not isinstance(min_duration_delta, (int, float)) or min_duration_delta < 0:
@@ -314,6 +388,7 @@ def load_data_sampling_settings(path: Path) -> dict[str, object]:
     return {
         "target_genres": list(dict.fromkeys(genre.strip() for genre in target_genres)),
         "sample_length_sec": float(sample_length_sec),
+        "sample_length_fallback_used": sample_length_fallback_used,
         "min_duration_delta": float(min_duration_delta),
         "number_of_samples_expected_each_genre": int(number_of_samples_expected_each_genre),
         "additional_samples_contribution_ratio_expected_each_genre": float(
@@ -858,7 +933,7 @@ def assign_final_splits(
         targets = _compute_final_split_targets(target_total, train_ratio_each_genre)
 
         grouped = (
-            genre_df.groupby("group_sample_id", dropna=False)
+            genre_df.groupby("group_sample_id", dropna=False, sort=False)
             .agg(
                 sample_count=("sample_id", "size"),
                 is_additional_source=("is_additional_source", "first"),
@@ -868,7 +943,6 @@ def assign_final_splits(
 
         additional_grouped = (
             grouped[grouped["is_additional_source"] == True]
-            .sample(frac=1.0, random_state=seed + genre_index)
             .reset_index(drop=True)
         )
         primary_grouped = (
@@ -1184,18 +1258,18 @@ def combine_dataset_manifest(*frames: pd.DataFrame) -> pd.DataFrame:
     return combined
 
 
-def load_stage1_datasets_manifest(path: Path) -> pd.DataFrame:
-    """Load the Stage 1a dataset manifest used as input for Stage 1b."""
+def load_dataset_manifest(path: Path, description: str) -> pd.DataFrame:
+    """Load a dataset manifest used as input for Stage 1b."""
     if not path.exists():
         raise FileNotFoundError(
-            f"Stage 1b requires an existing Stage 1a dataset manifest: {path}"
+            f"Stage 1b requires an existing {description}: {path}"
         )
 
     datasets = pd.read_parquet(path)
     missing = sorted(set(_DATASET_MANIFEST_COLUMNS).difference(datasets.columns))
     if missing:
         raise ValueError(
-            f"Missing required columns in Stage 1a dataset manifest {path}: {', '.join(missing)}"
+            f"Missing required columns in {description} {path}: {', '.join(missing)}"
         )
 
     datasets = datasets.copy()
@@ -1205,30 +1279,7 @@ def load_stage1_datasets_manifest(path: Path) -> pd.DataFrame:
     return datasets
 
 
-def upsert_dataset_manifest(existing: pd.DataFrame | None, incoming: pd.DataFrame) -> pd.DataFrame:
-    """Insert new dataset rows or update existing ones by artifact_id."""
-    existing_non_empty = existing is not None and not existing.empty
-    incoming_non_empty = incoming is not None and not incoming.empty
-
-    if not existing_non_empty and not incoming_non_empty:
-        return pd.DataFrame(columns=list(_DATASET_MANIFEST_COLUMNS))
-    if not existing_non_empty:
-        return combine_dataset_manifest(incoming)
-    if not incoming_non_empty:
-        return combine_dataset_manifest(existing)
-
-    merged = pd.concat([existing, incoming], axis=0, ignore_index=True)
-    before_dedup = len(merged)
-    merged = merged[list(_DATASET_MANIFEST_COLUMNS)].drop_duplicates(subset=["artifact_id"], keep="last")
-    logging.info("[Stage1a] Upserted dataset manifest: %d rows before dedup, %d after artifact_id upsert", before_dedup, len(merged))
-    merged = merged.sort_values(["genre_top", "source", "artifact_id"], kind="stable").reset_index(drop=True)
-    merged["track_id"] = pd.Series(merged["track_id"], dtype="Int64")
-    merged["filesize_bytes"] = pd.Series(merged["filesize_bytes"], dtype="Int64")
-    merged["sampling_num_segments"] = pd.Series(merged["sampling_num_segments"], dtype="Int64")
-    return merged
-
-
-def build_stage1a_dataset_manifest(
+def build_stage1a_dataset_manifests(
     stage1a_sources: str,
     medium_manifest_path: Path,
     fma_metadata_root: Path,
@@ -1239,10 +1290,11 @@ def build_stage1a_dataset_manifest(
     sample_length_sec: float,
     min_duration_s: float,
     force_rescan: bool,
-    all_datasets_out: Path,
-) -> pd.DataFrame:
-    """Build or incrementally upsert the Stage 1a dataset manifest."""
-    source_frames: list[pd.DataFrame] = []
+    fma_datasets_out: Path,
+    additional_datasets_out: Path,
+) -> dict[str, pd.DataFrame]:
+    """Build selected Stage 1a dataset manifests and overwrite their outputs."""
+    manifests: dict[str, pd.DataFrame] = {}
 
     if stage1a_sources in {"fma", "both"}:
         logging.info("Stage 1a/FMA: Building FMA candidates ...")
@@ -1256,7 +1308,9 @@ def build_stage1a_dataset_manifest(
             min_duration_s=min_duration_s,
             force_rescan=force_rescan,
         )
-        source_frames.append(fma_df)
+        write_parquet(fma_datasets_out, fma_df)
+        logging.info("Stage 1a/FMA: Wrote %s (%d rows)", fma_datasets_out, len(fma_df))
+        manifests["fma"] = fma_df
 
     if stage1a_sources in {"additional", "both"}:
         logging.info("Stage 1a/Additional: Collecting additional dataset candidates ...")
@@ -1266,29 +1320,18 @@ def build_stage1a_dataset_manifest(
             sample_length_sec,
             min_duration_s,
         )
-        source_frames.append(additional_df)
+        write_parquet(additional_datasets_out, additional_df)
+        logging.info("Stage 1a/Additional: Wrote %s (%d rows)", additional_datasets_out, len(additional_df))
+        manifests["additional"] = additional_df
 
-    incoming = combine_dataset_manifest(*source_frames)
-    existing = load_stage1_datasets_manifest(all_datasets_out) if all_datasets_out.exists() else None
-    if existing is not None:
-        logging.info("Stage 1a: Existing dataset manifest found at %s (%d rows)", all_datasets_out, len(existing))
-    else:
-        logging.info("Stage 1a: No existing dataset manifest found at %s; creating a new one", all_datasets_out)
-
-    merged = upsert_dataset_manifest(existing, incoming)
-    write_parquet(all_datasets_out, merged)
-    return merged
+    return manifests
 
 
 def build_samples_manifest(all_datasets: pd.DataFrame, sample_length_sec: float) -> pd.DataFrame:
     logging.info("[Samples] Building sample segments (sample_length=%.1fs) ...", sample_length_sec)
     t0 = time.time()
     if all_datasets.empty:
-        return pd.DataFrame(columns=[
-            "sample_id", "source", "genre_top", "filepath", "track_id", "sample_length_sec",
-            "segment_index", "segment_start_sec", "segment_end_sec", "total_segments_from_audio",
-            "duration_s", "actual_duration_s", "reason_code",
-        ])
+        return pd.DataFrame(columns=list(_SAMPLE_MANIFEST_COLUMNS))
 
     rows: list[dict[str, object]] = []
     eligible = all_datasets[
@@ -1336,16 +1379,40 @@ def build_samples_manifest(all_datasets: pd.DataFrame, sample_length_sec: float)
     return samples
 
 
+def combine_sample_manifests(*frames: pd.DataFrame, sort_output: bool = True) -> pd.DataFrame:
+    non_empty = [frame for frame in frames if frame is not None and not frame.empty]
+    if not non_empty:
+        return pd.DataFrame(columns=list(_SAMPLE_MANIFEST_COLUMNS))
+
+    combined = pd.concat(non_empty, axis=0, ignore_index=True)
+    combined = combined[list(_SAMPLE_MANIFEST_COLUMNS)].drop_duplicates(subset=["sample_id"], keep="first")
+    if sort_output:
+        combined = combined.sort_values(["genre_top", "source", "sample_id", "segment_index"], kind="stable")
+    combined = combined.reset_index(drop=True)
+    combined["track_id"] = pd.Series(combined["track_id"], dtype="Int64")
+    combined["total_segments_from_audio"] = pd.Series(combined["total_segments_from_audio"], dtype="Int64")
+    return combined
+
+
+def shuffle_sample_manifest(frame: pd.DataFrame, random_state: int, description: str) -> pd.DataFrame:
+    """Return a deterministically shuffled sample manifest for Stage 2 candidate ordering."""
+    if frame is None or frame.empty:
+        return frame
+
+    logging.info("Stage 2: Shuffling %s with split seed %d", description, random_state)
+    return frame.sample(frac=1.0, random_state=random_state).reset_index(drop=True)
+
+
 def write_parquet(path: Path, frame: pd.DataFrame) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     frame.to_parquet(path, engine="pyarrow", index=False)
 
 
-def load_stage1_samples_manifest(path: Path) -> pd.DataFrame:
-    """Load the Stage 1 sample manifest used as input for Stage 2."""
+def load_samples_manifest(path: Path, description: str) -> pd.DataFrame:
+    """Load a sample manifest used as input for Stage 2."""
     if not path.exists():
         raise FileNotFoundError(
-            f"Stage 2 requires an existing Stage 1 sample manifest: {path}"
+            f"Stage 2 requires an existing {description}: {path}"
         )
 
     samples = pd.read_parquet(path)
@@ -1357,13 +1424,46 @@ def load_stage1_samples_manifest(path: Path) -> pd.DataFrame:
     missing = sorted(required_columns.difference(samples.columns))
     if missing:
         raise ValueError(
-            f"Missing required columns in Stage 1 sample manifest {path}: {', '.join(missing)}"
+            f"Missing required columns in {description} {path}: {', '.join(missing)}"
         )
 
     samples = samples.copy()
     samples["track_id"] = pd.Series(samples["track_id"], dtype="Int64")
     samples["total_segments_from_audio"] = pd.Series(samples["total_segments_from_audio"], dtype="Int64")
     return samples
+
+
+def build_stage1b_sample_manifests(
+    stage1b_sources: str,
+    sample_length_sec: float,
+    fma_datasets_path: Path,
+    additional_datasets_path: Path,
+    fma_all_samples_out: Path,
+    additional_all_samples_out: Path,
+) -> dict[str, pd.DataFrame]:
+    """Build selected Stage 1b sample manifests and overwrite their outputs."""
+    manifests: dict[str, pd.DataFrame] = {}
+
+    if stage1b_sources in {"fma", "both"}:
+        logging.info("Stage 1b/FMA: Loading dataset manifest from %s", fma_datasets_path)
+        fma_datasets = load_dataset_manifest(fma_datasets_path, "Stage 1a FMA dataset manifest")
+        fma_samples = build_samples_manifest(fma_datasets, sample_length_sec)
+        write_parquet(fma_all_samples_out, fma_samples)
+        logging.info("Stage 1b/FMA: Wrote %s (%d rows)", fma_all_samples_out, len(fma_samples))
+        manifests["fma"] = fma_samples
+
+    if stage1b_sources in {"additional", "both"}:
+        logging.info("Stage 1b/Additional: Loading dataset manifest from %s", additional_datasets_path)
+        additional_datasets = load_dataset_manifest(
+            additional_datasets_path,
+            "Stage 1a additional dataset manifest",
+        )
+        additional_samples = build_samples_manifest(additional_datasets, sample_length_sec)
+        write_parquet(additional_all_samples_out, additional_samples)
+        logging.info("Stage 1b/Additional: Wrote %s (%d rows)", additional_all_samples_out, len(additional_samples))
+        manifests["additional"] = additional_samples
+
+    return manifests
 
 
 def summarize_skipped_audio_paths(all_datasets: pd.DataFrame) -> pd.DataFrame:
@@ -1577,6 +1677,7 @@ def main(argv: list[str] | None = None) -> int:
     settings = load_data_sampling_settings(settings_path)
     target_genres = settings["target_genres"]
     sample_length_sec = float(settings["sample_length_sec"])
+    sample_length_fallback_used = bool(settings.get("sample_length_fallback_used", False))
     min_duration_delta = float(settings["min_duration_delta"])
     number_of_samples_expected_each_genre = int(settings["number_of_samples_expected_each_genre"])
     additional_samples_contribution_ratio_each_genre = float(
@@ -1595,13 +1696,16 @@ def main(argv: list[str] | None = None) -> int:
     fma_metadata_root = Path(args.fma_metadata_root)
     fma_audio_root = Path(args.fma_audio_root)
     additional_root = Path(args.additional_root)
-    all_datasets_out = Path(args.all_datasets_out)
-    all_samples_out = Path(args.all_samples_out)
+    fma_datasets_out = Path(args.fma_datasets_out)
+    additional_datasets_out = Path(args.additional_datasets_out)
+    fma_all_samples_out = Path(args.fma_all_samples_out)
+    additional_all_samples_out = Path(args.additional_all_samples_out)
     final_samples_out = Path(args.final_samples_out)
 
     config = {
         "mode": args.mode,
         "stage1a_sources": args.stage1a_sources,
+        "stage1b_sources": args.stage1b_sources,
         "target_genres": target_genres,
         "sample_length_sec": sample_length_sec,
         "min_duration_delta": min_duration_delta,
@@ -1617,14 +1721,22 @@ def main(argv: list[str] | None = None) -> int:
         "fma_metadata_root": str(fma_metadata_root),
         "fma_audio_root": str(fma_audio_root),
         "additional_root": str(additional_root),
-        "all_datasets_out": str(all_datasets_out),
-        "all_samples_out": str(all_samples_out),
+        "fma_datasets_out": str(fma_datasets_out),
+        "additional_datasets_out": str(additional_datasets_out),
+        "fma_all_samples_out": str(fma_all_samples_out),
+        "additional_all_samples_out": str(additional_all_samples_out),
         "final_samples_out": str(final_samples_out),
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
 
     logging.info("Target genres: %s", target_genres)
     logging.info("Sample length: %.3fs", sample_length_sec)
+    if sample_length_fallback_used:
+        logging.warning(
+            "settings.data_sampling_settings.sample_length_sec was missing or invalid in %s; using default %.3fs",
+            settings_path,
+            DEFAULT_SAMPLE_LENGTH_SEC,
+        )
     logging.info("Min-duration delta: %.3fs", min_duration_delta)
     logging.info(
         "Per-genre final target: %d | additional contribution ratio: %.3f | train ratio: %.3f | split seed: %d",
@@ -1636,11 +1748,14 @@ def main(argv: list[str] | None = None) -> int:
     logging.info("FMA subset: %s | min_duration: %.3fs | force_rescan: %s",
                  args.fma_subset, min_duration_s, args.force_rescan)
     logging.info("Stage 1a sources: %s", args.stage1a_sources)
+    logging.info("Stage 1b sources: %s", args.stage1b_sources)
     logging.info("Execution mode: %s", args.mode)
     logging.info("=" * 60)
 
     t_start = time.time()
 
+    stage1a_outputs: dict[str, pd.DataFrame] = {}
+    stage1b_outputs: dict[str, pd.DataFrame] = {}
     all_datasets: pd.DataFrame | None = None
     all_samples: pd.DataFrame | None = None
     final_samples: pd.DataFrame | None = None
@@ -1648,8 +1763,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.mode in {"stage1a", "stage1", "both"}:
         t_stage1a = time.time()
-        logging.info("Step 1a: Building/upserting dataset manifest ...")
-        all_datasets = build_stage1a_dataset_manifest(
+        logging.info("Step 1a: Building dataset manifests ...")
+        stage1a_outputs = build_stage1a_dataset_manifests(
             stage1a_sources=args.stage1a_sources,
             medium_manifest_path=medium_manifest_path,
             fma_metadata_root=fma_metadata_root,
@@ -1660,31 +1775,68 @@ def main(argv: list[str] | None = None) -> int:
             sample_length_sec=sample_length_sec,
             min_duration_s=min_duration_s,
             force_rescan=args.force_rescan,
-            all_datasets_out=all_datasets_out,
+            fma_datasets_out=fma_datasets_out,
+            additional_datasets_out=additional_datasets_out,
         )
+        all_datasets = combine_dataset_manifest(*stage1a_outputs.values())
         logging.info("Step 1a done (%.1fs)\n", time.time() - t_stage1a)
 
     if args.mode == "stage1b":
-        logging.info("Stage 1b input: loading existing Stage 1a dataset manifest from %s", all_datasets_out)
-        all_datasets = load_stage1_datasets_manifest(all_datasets_out)
+        logging.info("Stage 1b: using source selection %s", args.stage1b_sources)
 
     if args.mode in {"stage1b", "stage1", "both"}:
-        if all_datasets is None:
-            logging.info("Stage 1b input: loading existing Stage 1a dataset manifest from %s", all_datasets_out)
-            all_datasets = load_stage1_datasets_manifest(all_datasets_out)
         t_stage1b = time.time()
-        logging.info("Step 1b: Building sample segments manifest ...")
-        all_samples = build_samples_manifest(all_datasets, sample_length_sec)
-        write_parquet(all_samples_out, all_samples)
+        logging.info("Step 1b: Building sample manifests ...")
+        stage1b_outputs = build_stage1b_sample_manifests(
+            stage1b_sources=args.stage1b_sources,
+            sample_length_sec=sample_length_sec,
+            fma_datasets_path=fma_datasets_out,
+            additional_datasets_path=additional_datasets_out,
+            fma_all_samples_out=fma_all_samples_out,
+            additional_all_samples_out=additional_all_samples_out,
+        )
+        all_samples = combine_sample_manifests(*stage1b_outputs.values())
         logging.info("Step 1b done (%.1fs)\n", time.time() - t_stage1b)
 
     if args.mode == "stage2":
-        logging.info("Stage 2 input: loading existing Stage 1 sample manifest from %s", all_samples_out)
-        all_samples = load_stage1_samples_manifest(all_samples_out)
+        logging.info(
+            "Stage 2 input: loading FMA and additional sample manifests from %s and %s",
+            fma_all_samples_out,
+            additional_all_samples_out,
+        )
 
     if args.mode in {"stage2", "both"}:
-        t4 = time.time()
-        logging.info("Step 5/5: Assigning final train/validation/test splits ...")
+        stage2_sample_frames: list[pd.DataFrame] = []
+        if "fma" in stage1b_outputs:
+            stage2_sample_frames.append(stage1b_outputs["fma"])
+        else:
+            stage2_sample_frames.append(
+                load_samples_manifest(fma_all_samples_out, "Stage 1b FMA sample manifest")
+            )
+
+        if "additional" in stage1b_outputs:
+            stage2_sample_frames.append(
+                shuffle_sample_manifest(
+                    stage1b_outputs["additional"],
+                    args.split_seed + 30_000,
+                    "in-memory Stage 1b additional sample manifest",
+                )
+            )
+        else:
+            stage2_sample_frames.append(
+                shuffle_sample_manifest(
+                    load_samples_manifest(
+                        additional_all_samples_out,
+                        "Stage 1b additional sample manifest",
+                    ),
+                    args.split_seed + 30_000,
+                    "loaded Stage 1b additional sample manifest",
+                )
+            )
+
+        all_samples = combine_sample_manifests(*stage2_sample_frames, sort_output=False)
+        t_stage2 = time.time()
+        logging.info("Step 2: Assigning final train/validation/test splits ...")
         all_samples, final_samples, split_summary = assign_final_splits(
             all_samples,
             number_of_samples_expected_each_genre,
@@ -1692,7 +1844,7 @@ def main(argv: list[str] | None = None) -> int:
             train_ratio_each_genre,
             args.split_seed,
         )
-        logging.info("Step 5/5 done (%.1fs)\n", time.time() - t4)
+        logging.info("Step 2 done (%.1fs)\n", time.time() - t_stage2)
         write_parquet(final_samples_out, final_samples)
 
     log_summary(all_datasets, all_samples, final_samples)
@@ -1700,19 +1852,23 @@ def main(argv: list[str] | None = None) -> int:
     if final_samples is not None:
         report_base = final_samples_out
     elif all_samples is not None:
-        report_base = all_samples_out
+        report_base = additional_all_samples_out if args.stage1b_sources == "additional" else fma_all_samples_out
     else:
-        report_base = all_datasets_out
+        report_base = additional_datasets_out if args.stage1a_sources == "additional" else fma_datasets_out
     report_path = report_base.with_suffix(".report.txt")
     config_path = report_base.with_suffix(".config.json")
     write_build_report(all_datasets, all_samples, final_samples, split_summary, report_path, config)
     write_config_snapshot(config, config_path)
 
     logging.info("=" * 60)
-    if all_datasets is not None:
-        logging.info("Wrote %s (%d rows)", all_datasets_out, len(all_datasets))
-    if all_samples is not None and args.mode in {"stage1b", "stage1", "both"}:
-        logging.info("Wrote %s (%d rows)", all_samples_out, len(all_samples))
+    if "fma" in stage1a_outputs:
+        logging.info("Wrote %s (%d rows)", fma_datasets_out, len(stage1a_outputs["fma"]))
+    if "additional" in stage1a_outputs:
+        logging.info("Wrote %s (%d rows)", additional_datasets_out, len(stage1a_outputs["additional"]))
+    if "fma" in stage1b_outputs:
+        logging.info("Wrote %s (%d rows)", fma_all_samples_out, len(stage1b_outputs["fma"]))
+    if "additional" in stage1b_outputs:
+        logging.info("Wrote %s (%d rows)", additional_all_samples_out, len(stage1b_outputs["additional"]))
     if final_samples is not None:
         logging.info("Wrote %s (%d rows)", final_samples_out, len(final_samples))
     logging.info("Total time: %.1fs", time.time() - t_start)
