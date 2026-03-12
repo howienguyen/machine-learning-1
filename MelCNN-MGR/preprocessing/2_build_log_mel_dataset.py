@@ -16,6 +16,11 @@ Defaults mirror the active baseline reference in baseline_logmel_cnn_v21.py:
 - n_mels = 192
 - n_fft = 512
 - hop_length = 256
+
+The default output-root suffix follows
+`settings.data_sampling_settings.sample_length_sec` when available and falls
+back to 15 seconds if the settings file cannot be read. The actual extraction
+length remains manifest-driven unless `--sample-length-sec` is provided.
 """
 
 from __future__ import annotations

@@ -13,7 +13,7 @@ This document provides a comprehensive, end-to-end description of the MelCNN-MGR
 3. [Stage 0: Data Acquisition — Jamendo Track Downloading](#3-stage-0-data-acquisition--jamendo-track-downloading)
 4. [Stage 0.5: Audio Segment Extraction from Jamendo Downloads](#4-stage-05-audio-segment-extraction-from-jamendo-downloads)
 5. [Data Sources](#5-data-sources)
-6. [Stage 1: Unified Manifest Builder — `1_build_all_datasets_and_samples.py`](#6-stage-1-unified-manifest-builder--1_build_all_datasets_and_samplespy)
+6. [Stage 1: Unified Manifest Builder — `1_build_all_datasets_and_samples_v1_1.py`](#6-stage-1-unified-manifest-builder--1_build_all_datasets_and_samples_v1_1py)
 7. [Stage 2: Log-Mel Feature Builder — `2_build_log_mel_dataset.py`](#7-stage-2-log-mel-feature-builder--2_build_log_mel_datasetpy)
 8. [Stage 3: Exploratory Data Analysis — `MelCNN_MGR_Manifest_LogMel_EDA.ipynb`](#8-stage-3-exploratory-data-analysis--melcnn_mgr_manifest_logmel_edaipynb)
 9. [Stage 4: Model Training — `logmel_cnn_v1.py`](#9-stage-4-model-training--logmel_cnn_v1py)
@@ -26,7 +26,7 @@ This document provides a comprehensive, end-to-end description of the MelCNN-MGR
 
 ## 1. Solution Overview
 
-MelCNN-MGR (Mel-spectrogram Convolutional Neural Network for Music Genre Recognition) is a multi-class audio classification system that maps 10-second audio clips to one of 10 musical genres:
+MelCNN-MGR (Mel-spectrogram Convolutional Neural Network for Music Genre Recognition) is a multi-class audio classification system that maps fixed-length audio clips, configured through `settings.json`, to one of 10 musical genres:
 
 > **Blues · Classical · Country · Electronic · Folk · Hip-Hop · Jazz · Metal · Pop · Rock**
 
@@ -71,11 +71,13 @@ The full production-like pipeline consists of five logical stages connected by w
                              ▼        ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │  STAGE 1: Manifest Builder                                             │
-│  MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py          │
+│  MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py     │
 │                                                                        │
 │  Outputs:                                                              │
-│    → manifest_all_datasets.parquet   (file-level discovery)            │
-│    → manifest_all_samples.parquet    (segment-level expansion)         │
+│    → manifest_fma_datasets.parquet        (file-level FMA discovery)   │
+│    → manifest_additional_datasets.parquet (file-level extra discovery) │
+│    → manifest_fma_all_samples.parquet     (segment-level FMA expansion)│
+│    → manifest_additional_all_samples.parquet (extra segment expansion) │
 │    → manifest_final_samples.parquet  (selected segments + splits)      │
 └────────────────────────────┬────────────────────────────────────────────┘
                              │
@@ -85,10 +87,10 @@ The full production-like pipeline consists of five logical stages connected by w
 │  MelCNN-MGR/preprocessing/2_build_log_mel_dataset.py                   │
 │                                                                        │
 │  Outputs:                                                              │
-│    → cache/logmel_dataset_10s/train/  (.npy log-mel spectrograms)      │
-│    → cache/logmel_dataset_10s/val/                                     │
-│    → cache/logmel_dataset_10s/test/                                    │
-│    → cache/logmel_dataset_10s/logmel_manifest_{split}.parquet          │
+│    → cache/logmel_dataset_<sample_length_sec>s/train/ (.npy log-mels)  │
+│    → cache/logmel_dataset_<sample_length_sec>s/val/                    │
+│    → cache/logmel_dataset_<sample_length_sec>s/test/                   │
+│    → cache/logmel_dataset_<sample_length_sec>s/logmel_manifest_*.parquet│
 └────────────────────────────┬────────────────────────────────────────────┘
                              │
                              ▼
@@ -237,7 +239,7 @@ The pipeline fuses audio from multiple sources into a single unified training se
 | **Artist filter** | Tracks by the same artist belong to a single split (prevents artist-effect leakage) |
 | **10 target genres** | FMA Medium is filtered to only the 10 genres defined in `settings.json` (`International` is excluded) |
 
-FMA provides the backbone of the dataset. Its 30-second clips are segmented into multiple 10-second samples by the manifest builder.
+FMA provides the backbone of the dataset. Its source clips are segmented into multiple fixed-length samples according to `settings.data_sampling_settings.sample_length_sec`.
 
 ### 5.2 Additional Datasets — Supplementary Sources
 
@@ -266,9 +268,9 @@ The settings parameter `additional_samples_contribution_ratio_expected_each_genr
 
 ---
 
-## 6. Stage 1: Unified Manifest Builder — `1_build_all_datasets_and_samples.py`
+## 6. Stage 1: Unified Manifest Builder — `1_build_all_datasets_and_samples_v1_1.py`
 
-**Script:** `MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py` (~1,500 lines)
+**Script:** `MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py` (~1,800 lines)
 
 ### Purpose
 
@@ -280,7 +282,7 @@ The script supports three modes via `--mode`:
 
 | Mode | Description |
 |------|-------------|
-| `stage1` | Build `manifest_all_datasets.parquet` and `manifest_all_samples.parquet` only |
+| `stage1` | Build the selected Stage 1a and Stage 1b per-source manifests only |
 | `stage2` | Build `manifest_final_samples.parquet` from existing Stage 1 outputs |
 | `both` | Execute both stages sequentially (default) |
 
@@ -315,8 +317,8 @@ Two paths are supported, selected automatically:
 
 ```
 FMA candidates + Additional candidates
-    → combine_dataset_manifest()      → manifest_all_datasets.parquet
-    → build_samples_manifest()        → manifest_all_samples.parquet
+    → per-source dataset manifests    → manifest_fma_datasets.parquet + manifest_additional_datasets.parquet
+    → per-source sample manifests     → manifest_fma_all_samples.parquet + manifest_additional_all_samples.parquet
 ```
 
 **Segment expansion rule**: For each eligible audio file:
@@ -330,7 +332,7 @@ Each segment gets a unique `sample_id` following the pattern:
 <artifact_id>:seg<NNNN>
 ```
 
-For example: `fma:12345:seg0000`, `fma:12345:seg0001`, `fma:12345:seg0002` for a 30s FMA track yielding three 10s segments.
+For example: `fma:12345:seg0000`, `fma:12345:seg0001`, `fma:12345:seg0002` for a 45s FMA track yielding three 15s segments under the current settings snapshot.
 
 #### Duration Normalization
 
@@ -360,7 +362,7 @@ For each genre independently:
 3. **Allocate additional-source quota**: Up to `additional_samples_contribution_ratio` of each split's target comes from supplementary sources.
 
 4. **Assign splits**:
-   - Shuffle additional-source groups (seeded), assign to their quota per split
+    - Deterministically shuffle the additional-source sample manifest before grouped split assignment
    - Shuffle primary (FMA) groups (seeded), assign to remaining quota
    - Fallback: if either pool is short, the other fills the gap
 
@@ -370,24 +372,26 @@ For each genre independently:
 
 | Artifact | Schema | Description |
 |----------|--------|-------------|
-| `manifest_all_datasets.parquet` | `source, artifact_id, source_track_id, track_id, genre_top, filepath, audio_exists, filesize_bytes, actual_duration_s, duration_s, reason_code, sampling_eligible, sampling_num_segments, sampling_exclusion_reason, manifest_origin` | One row per discovered audio file across all sources. Includes both eligible and ineligible files with reason codes for auditability. |
-| `manifest_all_samples.parquet` | `sample_id, source, genre_top, filepath, track_id, sample_length_sec, segment_index, segment_start_sec, segment_end_sec, total_segments_from_audio, duration_s, actual_duration_s, reason_code` | One row per 10-second segment from eligible files. |
+| `manifest_fma_datasets.parquet` | `source, artifact_id, source_track_id, track_id, genre_top, filepath, audio_exists, filesize_bytes, actual_duration_s, duration_s, reason_code, sampling_eligible, sampling_num_segments, sampling_exclusion_reason, manifest_origin` | One row per discovered FMA audio file candidate. |
+| `manifest_additional_datasets.parquet` | Same schema as `manifest_fma_datasets.parquet` | One row per discovered additional-source audio file candidate. |
+| `manifest_fma_all_samples.parquet` | `sample_id, source, genre_top, filepath, track_id, sample_length_sec, segment_index, segment_start_sec, segment_end_sec, total_segments_from_audio, duration_s, actual_duration_s, reason_code` | One row per fixed-length FMA segment from eligible files. |
+| `manifest_additional_all_samples.parquet` | Same schema as `manifest_fma_all_samples.parquet` | One row per fixed-length additional-source segment from eligible files. |
 | `manifest_final_samples.parquet` | Same as `all_samples` + `final_split` column | Selected subset with deterministic split assignment (training/validation/test). |
 
 ### CLI Usage
 
 ```bash
 # Full pipeline (both stages)
-python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py
+python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py
 
 # Stage 1 only (file discovery + segment expansion)
-python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py --mode stage1
+python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py --mode stage1
 
 # Stage 2 only (split assignment from existing Stage 1 output)
-python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py --mode stage2
+python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py --mode stage2
 
 # Force FMA rebuild from tracks.csv (ignore cached manifest)
-python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py --force-rescan
+python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py --force-rescan
 ```
 
 ---
@@ -421,13 +425,13 @@ Transform the segment-level manifest from Stage 1 into actual **Log-Mel spectrog
 | `N_MELS` | 192 | Number of mel filter bands |
 | `N_FFT` | 512 | FFT window size |
 | `HOP_LENGTH` | 256 | Hop between STFT frames |
-| `sample_length_sec` | 10.0 | Segment duration (from settings) |
-| `N_FRAMES` | computed: `ceil(sample_length_sec × SAMPLE_RATE / HOP_LENGTH) + 1` | Exact number of time-axis frames |
+| `sample_length_sec` | manifest-driven at runtime; default output-root suffix follows settings with a `15.0` fallback if settings cannot be read | Segment duration |
+| `N_FRAMES` | computed: `int(sample_length_sec × SAMPLE_RATE / HOP_LENGTH)` | Exact number of time-axis frames used by the current builder |
 
 The Log-Mel computation:
 
 ```
-        raw audio (10s, 22050 Hz)
+        raw audio (sample_length_sec, 22050 Hz)
             │
             ▼
     STFT(n_fft=512, hop=256)
@@ -458,7 +462,7 @@ Samples are processed using Python's `concurrent.futures.ProcessPoolExecutor` wi
 ### Output Structure
 
 ```
-MelCNN-MGR/cache/logmel_dataset_10s/
+MelCNN-MGR/cache/logmel_dataset_<sample_length_sec>s/
 ├── config.json                          # Build configuration snapshot
 ├── build_report.txt                     # Human-readable build statistics
 ├── logmel_manifest_all.parquet          # Combined index across all splits
@@ -534,13 +538,13 @@ Defines reusable utilities:
 - Reports missing or extra columns per artifact
 
 #### Section 5: File-Level Discovery Analysis
-Analyzes `manifest_all_datasets.parquet`:
+Analyzes the Stage 1a dataset manifests:
 - Audio file counts by source, genre, reason code, eligibility
 - Duration distributions (histograms, summary statistics)
 - Identification of skipped or unusable files
 
 #### Section 6: Segment Expansion & Final Split Audits
-Analyzes the transition from `manifest_all_samples.parquet` → `manifest_final_samples.parquet`:
+Analyzes the transition from the Stage 1b sample manifests → `manifest_final_samples.parquet`:
 - **Segment retention ratio**: How many emitted segments were selected vs. dropped
 - **Genre distribution**: Bar plots of final segment counts by genre
 - **Split balance**: Genre × split crosstab (counts and percentages)
@@ -812,7 +816,7 @@ This single JSON file governs the data sampling behavior of the manifest builder
         "number_of_samples_expected_each_genre": 1300,
         "additional_samples_contribution_ratio_expected_each_genre": 0.39,
         "train_n_val_test_split_ratio_each_genre": 0.8,
-        "sample_length_sec": 10,
+        "sample_length_sec": 15,
         "min_duration_delta": 0.001
     }
 }
@@ -826,7 +830,7 @@ This single JSON file governs the data sampling behavior of the manifest builder
 | `number_of_samples_expected_each_genre` | 1,300 | Target sample count per genre in the final manifest. Actual count depends on available audio. |
 | `additional_samples_contribution_ratio_expected_each_genre` | 0.39 | Up to 39% of each genre's samples may come from supplementary sources. |
 | `train_n_val_test_split_ratio_each_genre` | 0.8 | 80% training / 10% validation / 10% test per genre. |
-| `sample_length_sec` | 10 | Each sample is a 10-second audio segment. |
+| `sample_length_sec` | 15 | Each sample is a 15-second audio segment in the current settings snapshot. |
 | `min_duration_delta` | 0.001 | Tolerance for minimum duration filter: min_duration = `sample_length_sec - 0.001`. |
 
 ### Derived Values
@@ -873,17 +877,19 @@ machine-learning-1/                              ← Workspace root
 │   ├── settings.json                            ← Central configuration
 │   │
 │   ├── preprocessing/
-│   │   ├── 1_build_all_datasets_and_samples.py  ← [Stage 1] Manifest builder
+│   │   ├── 1_build_all_datasets_and_samples_v1_1.py  ← [Stage 1] Manifest builder
 │   │   └── 2_build_log_mel_dataset.py           ← [Stage 2] Feature builder
 │   │
 │   ├── data/processed/                          ← Stage 1 outputs
-│   │   ├── manifest_all_datasets.parquet
-│   │   ├── manifest_all_samples.parquet
+│   │   ├── manifest_fma_datasets.parquet
+│   │   ├── manifest_additional_datasets.parquet
+│   │   ├── manifest_fma_all_samples.parquet
+│   │   ├── manifest_additional_all_samples.parquet
 │   │   ├── manifest_final_samples.parquet
 │   │   ├── build_report.txt
 │   │   └── build_config.json
 │   │
-│   ├── cache/logmel_dataset_10s/                ← Stage 2 outputs
+│   ├── cache/logmel_dataset_<sample_length_sec>s/ ← Stage 2 outputs
 │   │   ├── config.json
 │   │   ├── build_report.txt
 │   │   ├── logmel_manifest_all.parquet
@@ -920,13 +926,13 @@ machine-learning-1/                              ← Workspace root
 
 ## 13. Design Decisions and Rationale
 
-### 13.1 Why 10-Second Segments?
+### 13.1 Why Fixed-Length Segments?
 
-The pipeline standardizes on **10-second fixed-length segments** rather than the original FMA 30-second clips. Reasons:
+The pipeline standardizes on fixed-length segments, controlled by `settings.data_sampling_settings.sample_length_sec`, rather than the original full source durations. Reasons:
 
 1. **Data multiplication**: A 30s FMA track yields 3 training samples instead of 1, effectively tripling the dataset with real (non-synthetic) content.
 2. **Real-world alignment**: Most streaming/radio use cases classify short clips, not full tracks.
-3. **Memory efficiency**: Smaller spectrograms (10s → ~862 frames vs. 30s → ~2,582 frames) reduce GPU memory per batch.
+3. **Memory efficiency**: Smaller spectrograms from short fixed-length clips reduce GPU memory per batch relative to full 30-second inputs.
 4. **Augmentation diversity**: More segments per track means the model sees different parts of the same song as separate training examples.
 
 **Trade-off**: Some genre cues (e.g., song structure, long-term rhythm patterns) may only be apparent over longer durations. The 3-crop inference mode partially mitigates this.
@@ -968,7 +974,7 @@ The contribution ratio of 39% was chosen to balance diversity against distributi
 
 ### 13.5 Why Segment-Level Leakage Prevention?
 
-When a 30s track is split into three 10s segments, those segments are highly correlated (same artist, same recording, overlapping musical content). If segment 0 is in training and segment 2 is in test, the model can achieve artificially high test accuracy by memorizing track-specific features rather than learning generalizable genre cues.
+When a long track is split into multiple fixed-length segments, those segments are highly correlated (same artist, same recording, overlapping musical content). If one segment is in training and another is in test, the model can achieve artificially high test accuracy by memorizing track-specific features rather than learning generalizable genre cues.
 
 The manifest builder prevents this by grouping all segments from the same source audio file (identified by stripping the `:segNNNN` suffix from `sample_id`) and assigning the entire group to a single split.
 

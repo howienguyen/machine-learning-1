@@ -1,14 +1,23 @@
 """Extract fixed-length audio segments from genre_downloads.
 
-README-style usage example:
+Verbose mode (default):
 
-    python extract_mtg_processed_samples.py \
-        --input-dir genre_downloads \
-        --output-dir mtg-processed-samples \
-        --segment-seconds 11 \
-        --max-num-segments 3 \
-        --min-duration-seconds 30 \
-        --edge-buffer-seconds 20
+    python extract_audio_samples.py
+
+Quiet mode for less terminal stress:
+
+    python extract_audio_samples.py --quiet
+
+Terminal note: (If you don't use --quiet)
+
+    On some VS Code integrated terminals, very noisy multiprocessing output can
+    temporarily corrupt terminal rendering so typed characters appear invisible
+    even though input still works. If that happens after the script exits, run:
+
+        stty sane
+
+    The default logging prints per-file messages. Use --quiet if your terminal
+    rendering becomes slow or glitchy.
 
 Segment count selection per eligible file:
     - duration <= min-duration-seconds: skipped
@@ -30,8 +39,8 @@ import numpy as np
 import soundfile as sf
 
 
-DEFAULT_INPUT_DIR = Path("genre_downloads/mtg-jamendo")
-DEFAULT_OUTPUT_DIR = Path("genre_downloads/cropped-audio/mtg-jamendo")
+DEFAULT_INPUT_DIR = Path("genre_downloads/my-collection")
+DEFAULT_OUTPUT_DIR = Path("genre_downloads/cropped-audio/my-collection")
 SUPPORTED_EXTENSIONS = {".mp3", ".wav"}
 _FFMPEG = shutil.which("ffmpeg")
 _FFPROBE = shutil.which("ffprobe")
@@ -53,7 +62,15 @@ def parse_args() -> argparse.Namespace:
             "Extract fixed-length samples from eligible audio files in genre_downloads "
             "subfolders, using per-file duration rules to reduce the number of segments "
             "for shorter clips."
-        )
+        ),
+        epilog=(
+            "Logging behavior:\n"
+            "  default   show everything (per-file OK/SKIP, worker summaries, etc.)\n"
+            "  --quiet   show failures, worker summaries, and final summary only\n\n"
+            "If your integrated terminal finishes in a strange state where typed\n"
+            "characters become invisible, use --quiet or run: stty sane"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--input-dir",
@@ -76,7 +93,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-num-segments",
         type=int,
-        default=3,
+        default=600,
         help=(
             "Maximum number of segments to extract from a single file. "
             "Files longer than min-duration-seconds but <= 30s use 1 segment; "
@@ -118,7 +135,30 @@ def parse_args() -> argparse.Namespace:
             "Use 1 to disable multiprocessing."
         ),
     )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help=(
+            "Disable per-file skip/success messages. By default, all files are logged. "
+            "Use this if your terminal rendering is slow or glitchy."
+        ),
+    )
     return parser.parse_args()
+
+
+def _log(message: str, *, flush: bool = False) -> None:
+    print(message, flush=flush)
+
+
+def _log_verbose(quiet: bool, message: str, *, flush: bool = False) -> None:
+    if not quiet:
+        print(message, flush=flush)
+
+
+def _log_progress(quiet: bool, message: str, *, done: bool = False) -> None:
+    if quiet:
+        return
+    print(message, flush=True)
 
 
 def find_input_subdirs(input_dir: Path) -> list[Path]:
@@ -297,17 +337,21 @@ def process_subfolder(
     min_duration_seconds: float,
     edge_buffer_seconds: float,
     overwrite: bool,
+    quiet: bool,
 ) -> dict[str, int]:
     audio_files = find_audio_files_in_subdir(subdir)
+    total_audio_files = len(audio_files)
+    estimated_total_segments = max(1, total_audio_files * max_num_segments)
     processed_files = 0
     skipped_short = 0
     failed_files = 0
     written_segments = 0
 
-    print(f"[worker:{subdir.name}] audio_files_found={len(audio_files)}", flush=True)
+    _log(f"[worker:{subdir.name}] audio_files_found={total_audio_files}", flush=True)
 
-    for audio_path in audio_files:
+    for file_index, audio_path in enumerate(audio_files, start=1):
         try:
+            progress_pct = 100.0 * written_segments / estimated_total_segments
             if backend == "ffmpeg":
                 duration_seconds = probe_duration_ffprobe(audio_path)
                 waveform = None
@@ -320,9 +364,16 @@ def process_subfolder(
 
             if duration_seconds <= min_duration_seconds:
                 skipped_short += 1
-                print(
-                    f"SKIP short: {audio_path} ({duration_seconds:.2f}s <= {min_duration_seconds:.2f}s)",
-                    flush=True,
+                _log_progress(
+                    quiet,
+                    "[worker:{worker}] est={done:04d}/{total:04d} ({pct:5.1f}%) SKIP {source} duration={duration:.2f}s".format(
+                        worker=subdir.name,
+                        done=written_segments,
+                        total=estimated_total_segments,
+                        pct=progress_pct,
+                        source=audio_path.relative_to(input_dir),
+                        duration=duration_seconds,
+                    ),
                 )
                 continue
 
@@ -339,7 +390,7 @@ def process_subfolder(
             )
             if len(start_times) != num_segments:
                 failed_files += 1
-                print(f"FAIL start-time generation: {audio_path}", flush=True)
+                _log(f"FAIL start-time generation: {audio_path}", flush=True)
                 continue
 
             relative_parent = audio_path.parent.relative_to(input_dir)
@@ -371,7 +422,7 @@ def process_subfolder(
                     expected_samples = int(round(segment_seconds * sample_rate))
                     if segment.shape[-1] < expected_samples:
                         failed_files += 1
-                        print(
+                        _log(
                             f"FAIL short slice: {audio_path} seg{index:02d} got {segment.shape[-1]} samples, "
                             f"expected {expected_samples}",
                             flush=True,
@@ -380,16 +431,65 @@ def process_subfolder(
 
                     write_audio(output_path, segment, sample_rate)
                 written_segments += 1
+                progress_pct = 100.0 * written_segments / estimated_total_segments
+                _log_progress(
+                    quiet,
+                    "[worker:{worker}] est={done:04d}/{total:04d} ({pct:5.1f}%) WRITE -> {output} seg={index:02d} start={start:.2f}s".format(
+                        worker=subdir.name,
+                        done=written_segments,
+                        total=estimated_total_segments,
+                        pct=progress_pct,
+                        output=output_path.relative_to(output_dir),
+                        index=index,
+                        start=start_seconds,
+                    ),
+                )
 
             processed_files += 1
-            print(
-                f"OK: {audio_path} -> {num_segments} segment(s) at {[round(value, 2) for value in start_times]}",
-                flush=True,
+            _log_progress(
+                quiet,
+                "[worker:{worker}] est={done:04d}/{total:04d} ({pct:5.1f}%) OK file={current}/{file_total} segments={num_segments} starts={starts}".format(
+                    worker=subdir.name,
+                    done=written_segments,
+                    total=estimated_total_segments,
+                    pct=progress_pct,
+                    current=file_index,
+                    file_total=total_audio_files,
+                    num_segments=num_segments,
+                    starts=[round(value, 2) for value in start_times],
+                ),
             )
 
         except Exception as exc:
             failed_files += 1
-            print(f"FAIL: {audio_path} ({exc})", flush=True)
+            _log(f"FAIL: {audio_path} ({exc})", flush=True)
+
+    _log_progress(
+        quiet,
+        "[worker:{worker}] est={done:04d}/{total:04d} ({pct:5.1f}%) completed {processed}/{file_total} files | skipped_short={skipped} failed={failed} written_segments={written}".format(
+            worker=subdir.name,
+            done=written_segments,
+            total=estimated_total_segments,
+            pct=(100.0 * written_segments / estimated_total_segments),
+            processed=processed_files,
+            file_total=total_audio_files,
+            skipped=skipped_short,
+            failed=failed_files,
+            written=written_segments,
+        ),
+        done=True,
+    )
+
+    _log(
+        "[worker:{name}] processed={processed} skipped_short={skipped} failed={failed} written_segments={written}".format(
+            name=subdir.name,
+            processed=processed_files,
+            skipped=skipped_short,
+            failed=failed_files,
+            written=written_segments,
+        ),
+        flush=True,
+    )
 
     return {
         "audio_files_found": len(audio_files),
@@ -438,6 +538,7 @@ def main() -> None:
                 min_duration_seconds=args.min_duration_seconds,
                 edge_buffer_seconds=args.edge_buffer_seconds,
                 overwrite=args.overwrite,
+                quiet=args.quiet,
             )
             processed_files += result["processed_files"]
             skipped_short += result["skipped_short"]
@@ -457,6 +558,7 @@ def main() -> None:
                     args.min_duration_seconds,
                     args.edge_buffer_seconds,
                     args.overwrite,
+                    args.quiet,
                 ): subdir
                 for subdir in subdirs
             }
@@ -467,7 +569,7 @@ def main() -> None:
                     result = future.result()
                 except Exception as exc:
                     failed_files += len(find_audio_files_in_subdir(subdir))
-                    print(f"FAIL worker: {subdir} ({exc})")
+                    _log(f"FAIL worker: {subdir} ({exc})")
                     continue
 
                 processed_files += result["processed_files"]
@@ -480,6 +582,7 @@ def main() -> None:
     print(f"output_dir: {output_dir}")
     print(f"audio_files_found: {len(audio_files)}")
     print(f"processed_files: {processed_files}")
+    print(f"processed_pct: {(100.0 * processed_files / len(audio_files)) if audio_files else 0.0:.1f}%")
     print(f"skipped_short: {skipped_short}")
     print(f"failed_files: {failed_files}")
     print(f"written_segments: {written_segments}")

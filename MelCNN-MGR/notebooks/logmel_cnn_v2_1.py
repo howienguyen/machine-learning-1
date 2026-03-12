@@ -1,20 +1,22 @@
 # %% [markdown]
-# # Log-Mel CNN v2
+# # Log-Mel CNN v2.1
 #
-# Warm-start-capable version of `logmel_cnn_v1_1.py` targeting higher Macro-F1 via:
-# - **Macro-F1-driven checkpointing + EarlyStopping** — align training control with the primary metric
-# - **Mixup augmentation** (α=0.3) — primary regularizer against overfitting
-# - **Mixup before SpecAugment** — follows the intended augmentation order
-# - **Stronger SpecAugment** (freq=24, time=40) — harder partial-info training
-# - **Adaptive class weights** — only apply them when the train split is meaningfully imbalanced
-# - **Moderate dropout** — keep dropout, but avoid over-regularizing a balanced dataset
-# - **Higher weight decay** (5e-4) — stronger L2 regularisation
-# - **Dense bottleneck** before output — better feature disentangling
-# - **Lower LR** (5e-4) and **longer warmup** (5 epochs) — stability
-# - **Label smoothing disabled with Mixup** — avoid over-softening targets
-# - **Optional warm-start initialization** — start a fresh run from an existing `.keras` checkpoint
-# - **Backbone-only reset warning** — make it explicit when `backbone_only` resets the classifier head despite matching classes
-# - **Optional staged backbone freezing** — `--freeze-backbone-epochs N` trains the fresh head first, then unfreezes the transferred backbone
+# Regularization-tuned version of `logmel_cnn_v2.py` targeting higher Macro-F1 via:
+# - **Reduced SpecAugment** (num_masks=1) — avoid overmasking when combined with Mixup
+# - **Graduated spatial dropout** (0.05→0.20) — concentrate regularization in deeper layers
+# - **Wider bottleneck** (256 units) — preserve full backbone feature space for the classifier
+# - **Reduced weight decay** (1e-4) — lighter L2 when Mixup+dropout already active
+# - **Gradient clipping** (clipnorm=1.0) — stabilize training with mixed class-weighted loss
+# - **Pre-Mixup class weighting** — anchor-based sample weights preserve class-balance signal
+# - **Longer early stopping patience** (20 epochs) — allow the cosine LR tail to refine
+# - **Lower final dropout** (0.20) — avoid over-constraining the wider bottleneck
+#
+# Inherits all v2 features:
+# - Macro-F1-driven checkpointing + EarlyStopping
+# - Mixup augmentation (α=0.3) + SpecAugment
+# - Adaptive class weights + label smoothing disabled with Mixup
+# - Optional warm-start initialization + staged backbone freezing
+# - Optimizer continuity across staged freeze/unfreeze training
 #
 # Train directly from prebuilt log-mel `.npy` features referenced by:
 # - `logmel_manifest_train.parquet`
@@ -25,18 +27,20 @@
 # `MelCNN-MGR/preprocessing/2_build_log_mel_dataset.py`
 #
 # Warm-start usage example:
-# python MelCNN-MGR/notebooks/logmel_cnn_v2.py --pretrained-model MelCNN-MGR/models/logmel-cnn-demo/best_model_macro_f1.keras
-# python MelCNN-MGR/notebooks/logmel_cnn_v2.py --pretrained-model MelCNN-MGR/models/logmel-cnn-demo/best_model_macro_f1.keras --pretrained-mode backbone_only --freeze-backbone-epochs 3
+# python MelCNN-MGR/notebooks/logmel_cnn_v2_1.py --pretrained-model MelCNN-MGR/models/logmel-cnn-demo/best_model_macro_f1.keras
+# python MelCNN-MGR/notebooks/logmel_cnn_v2_1.py --pretrained-model MelCNN-MGR/models/logmel-cnn-demo/best_model_macro_f1.keras --pretrained-mode backbone_only --freeze-backbone-epochs 3
 
 # %% [markdown]
 # ## 1. Imports
 
 # %%
 import argparse
+import atexit
 import json
 import os
 import platform
 import random
+import sys
 import time
 import warnings
 from pathlib import Path
@@ -58,12 +62,66 @@ os.environ["ONEDNN_VERBOSE"] = "none"
 os.environ["DNNL_VERBOSE"] = "0"
 warnings.filterwarnings("ignore", category=UserWarning)
 
+
+_ORIGINAL_STDOUT = sys.stdout
+_ORIGINAL_STDERR = sys.stderr
+_CONSOLE_CAPTURE_FILE = None
+_CONSOLE_CAPTURE_PATH = None
+
+
+class _StreamTee:
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for stream in self.streams:
+            stream.write(data)
+        return len(data)
+
+    def flush(self):
+        for stream in self.streams:
+            stream.flush()
+
+    def isatty(self):
+        return False
+
+
+def _stop_console_capture() -> None:
+    global _CONSOLE_CAPTURE_FILE, _CONSOLE_CAPTURE_PATH
+    if _CONSOLE_CAPTURE_FILE is None:
+        return
+    sys.stdout = _ORIGINAL_STDOUT
+    sys.stderr = _ORIGINAL_STDERR
+    try:
+        _CONSOLE_CAPTURE_FILE.flush()
+    finally:
+        _CONSOLE_CAPTURE_FILE.close()
+    _CONSOLE_CAPTURE_FILE = None
+    _CONSOLE_CAPTURE_PATH = None
+
+
+def _start_console_capture(log_path: Path) -> None:
+    global _CONSOLE_CAPTURE_FILE, _CONSOLE_CAPTURE_PATH
+    resolved = str(log_path.resolve())
+    if _CONSOLE_CAPTURE_PATH == resolved:
+        return
+    _stop_console_capture()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_file = log_path.open("a", encoding="utf-8", buffering=1)
+    sys.stdout = _StreamTee(_ORIGINAL_STDOUT, log_file)
+    sys.stderr = _StreamTee(_ORIGINAL_STDERR, log_file)
+    _CONSOLE_CAPTURE_FILE = log_file
+    _CONSOLE_CAPTURE_PATH = resolved
+
+
+atexit.register(_stop_console_capture)
+
 print(f"Python     : {platform.python_version()}")
 print(f"TensorFlow : {tf.__version__}")
 
 
 CLI_PARSER = argparse.ArgumentParser(
-    description="Train Log-Mel CNN v2 from scratch or warm-start from an existing .keras checkpoint.",
+    description="Train Log-Mel CNN v2.1 from scratch or warm-start from an existing .keras checkpoint.",
 )
 CLI_PARSER.add_argument(
     "--pretrained-model",
@@ -133,25 +191,32 @@ TEST_MANIFEST_PATH = LOGMEL_DATASET_DIR / "logmel_manifest_test.parquet"
 LOGMEL_CONFIG_PATH = LOGMEL_DATASET_DIR / "logmel_config.json"
 
 RUN_DIR = None
-RUN_FAMILY = "logmel-cnn-v2"
+RUN_FAMILY = "logmel-cnn-v2_1"
+_run_ts = time.strftime("%Y%m%d-%H%M%S")
+RUN_DIR = MODELS_BASE_DIR / f"{RUN_FAMILY}-{_run_ts}"
+RUN_DIR.mkdir(parents=True, exist_ok=True)
+CONSOLE_LOG_PATH = RUN_DIR / "console_output.txt"
+_start_console_capture(CONSOLE_LOG_PATH)
+print(f"Run directory : {RUN_DIR}")
+print(f"Console log   : {CONSOLE_LOG_PATH}")
 
-EPOCHS = int(os.environ.get("LOGMEL_CNN_EPOCHS", "128"))
+EPOCHS = int(os.environ.get("LOGMEL_CNN_EPOCHS", "102"))
 BATCH_SIZE = int(os.environ.get("LOGMEL_CNN_BATCH_SIZE", "32"))
 LABEL_SMOOTHING = 0.0            # Mixup already softens labels; keep CE targets sharp otherwise
-WEIGHT_DECAY = 5e-4                # v1.1: 5e-4 (was 1e-4)
+WEIGHT_DECAY = 1e-4                # v2.1: 1e-4 (was v2: 5e-4) — lighter with Mixup+dropout active
 
-SPEC_AUG_FREQ_MASK = 24            # v1.1: 24 (was 15)
-SPEC_AUG_TIME_MASK = 40            # v1.1: 40 (was 25)
-SPEC_AUG_NUM_MASKS = 2
+SPEC_AUG_FREQ_MASK = 24            # inherited mask size; v2.1 reduces total masking via num_masks=1
+SPEC_AUG_TIME_MASK = 40            # inherited mask size; v2.1 reduces total masking via num_masks=1
+SPEC_AUG_NUM_MASKS = 1             # v2.1: 1 (was v2: 2) — avoid overmasking with Mixup
 
-MAX_CLASS_WEIGHT = 1.5             # v1.1: cap class weights to prevent over-prediction
-MIXUP_ALPHA = 0.3                  # v1.1: Mixup blending parameter (Beta distribution)
+MAX_CLASS_WEIGHT = 1.5             # cap class weights to prevent over-prediction
+MIXUP_ALPHA = 0.3                  # keep the v2 Mixup blending parameter unchanged
 CLASS_WEIGHT_IMBALANCE_THRESHOLD = 1.05
-SPATIAL_DROPOUT_RATE_BLOCK2 = 0.10
+SPATIAL_DROPOUT_RATE_BLOCK2 = 0.05  # v2.1: graduated — light in early layers
 SPATIAL_DROPOUT_RATE_BLOCK3 = 0.10
-SPATIAL_DROPOUT_RATE_BLOCK4 = 0.10
-SPATIAL_DROPOUT_RATE_BLOCK5 = 0.10
-FINAL_DROPOUT_RATE = 0.25
+SPATIAL_DROPOUT_RATE_BLOCK4 = 0.15  # v2.1: graduated — stronger in deep layers
+SPATIAL_DROPOUT_RATE_BLOCK5 = 0.20  # v2.1: graduated — strongest in deepest layer
+FINAL_DROPOUT_RATE = 0.20           # v2.1: 0.20 (was v2: 0.25) — wider bottleneck absorbs capacity
 
 PRETRAINED_MODEL_ENV = os.environ.get("LOGMEL_CNN_PRETRAINED_MODEL", "").strip()
 PRETRAINED_MODEL_RAW = (CLI_ARGS.pretrained_model or PRETRAINED_MODEL_ENV).strip()
@@ -621,13 +686,21 @@ def mixup_batch(x_batch, y_batch, alpha=MIXUP_ALPHA):
     return x_mixed, y_mixed
 
 
-def attach_class_weights(x_batch, y_batch):
-    sample_weights = tf.reduce_sum(y_batch * CLASS_WEIGHT_VECTOR[tf.newaxis, :], axis=1)
-    sample_weights.set_shape((None,))
-    return x_batch, y_batch, sample_weights
+def mixup_batch_weighted(x_batch, y_batch, alpha=MIXUP_ALPHA):
+    """Apply Mixup with pre-Mixup (anchor-based) class weights.
+
+    Computes each sample's class weight from its original one-hot label
+    *before* blending, then returns the anchor sample's weight as the
+    per-sample loss weight.  This avoids the diluted gradient signal that
+    occurs when class weights are computed from post-Mixup soft labels.
+    """
+    anchor_weights = tf.reduce_sum(y_batch * CLASS_WEIGHT_VECTOR[tf.newaxis, :], axis=1)
+    x_mixed, y_mixed = mixup_batch(x_batch, y_batch, alpha)
+    anchor_weights.set_shape((None,))
+    return x_mixed, y_mixed, anchor_weights
 
 
-def make_dataset(index_df: pd.DataFrame, batch_size: int, shuffle: bool, augment: bool = False) -> tf.data.Dataset:
+def make_dataset(index_df: pd.DataFrame, batch_size: int, shuffle: bool, augment: bool = False, weighted_mixup: bool = False) -> tf.data.Dataset:
     paths = index_df["logmel_path"].to_numpy(dtype=str)
     labels = index_df["label_int"].to_numpy(dtype=np.int32)
 
@@ -647,22 +720,27 @@ def make_dataset(index_df: pd.DataFrame, batch_size: int, shuffle: bool, augment
 
     if augment:
         # Order: normalize -> batch -> Mixup -> SpecAugment
-        ds = ds.map(lambda x, y: mixup_batch(x, y, MIXUP_ALPHA), num_parallel_calls=AUTOTUNE)
-        ds = ds.map(lambda x, y: (spec_augment_batch(x), y), num_parallel_calls=AUTOTUNE)
+        if weighted_mixup:
+            # Pre-Mixup class weighting: anchor sample's class weight is preserved
+            ds = ds.map(lambda x, y: mixup_batch_weighted(x, y, MIXUP_ALPHA), num_parallel_calls=AUTOTUNE)
+            ds = ds.map(lambda x, y, w: (spec_augment_batch(x), y, w), num_parallel_calls=AUTOTUNE)
+        else:
+            ds = ds.map(lambda x, y: mixup_batch(x, y, MIXUP_ALPHA), num_parallel_calls=AUTOTUNE)
+            ds = ds.map(lambda x, y: (spec_augment_batch(x), y), num_parallel_calls=AUTOTUNE)
 
     ds = ds.prefetch(AUTOTUNE)
     return ds
 
 
-train_ds = make_dataset(train_df, BATCH_SIZE, shuffle=True, augment=True)
-train_fit_ds = train_ds.map(attach_class_weights, num_parallel_calls=AUTOTUNE).prefetch(AUTOTUNE) if USE_CLASS_WEIGHTS else train_ds
+train_ds = make_dataset(train_df, BATCH_SIZE, shuffle=True, augment=True, weighted_mixup=USE_CLASS_WEIGHTS)
+train_fit_ds = train_ds
 train_eval_ds = make_dataset(train_df, BATCH_SIZE, shuffle=False, augment=False)
 val_ds = make_dataset(val_df, BATCH_SIZE, shuffle=False, augment=False)
 test_ds = make_dataset(test_df, BATCH_SIZE, shuffle=False, augment=False)
 
 print("\nDatasets ready:")
 print(f"  train batches: {tf.data.experimental.cardinality(train_ds).numpy()}  (SpecAugment=ON, Mixup=ON)")
-print(f"  train fit     : class_weights={'ON' if USE_CLASS_WEIGHTS else 'OFF'}")
+print(f"  train fit     : class_weights={'ON (pre-Mixup anchor)' if USE_CLASS_WEIGHTS else 'OFF'}")
 print(f"  train eval    : {tf.data.experimental.cardinality(train_eval_ds).numpy()}  (SpecAugment=OFF, Mixup=OFF)")
 print(f"  val   batches: {tf.data.experimental.cardinality(val_ds).numpy()}  (SpecAugment=OFF, Mixup=OFF)")
 print(f"  test  batches: {tf.data.experimental.cardinality(test_ds).numpy()}  (SpecAugment=OFF, Mixup=OFF)")
@@ -715,12 +793,12 @@ def build_model(n_classes: int) -> keras.Model:
     x = layers.SpatialDropout2D(SPATIAL_DROPOUT_RATE_BLOCK5, name="sdrop5")(x)
     x = layers.MaxPool2D((2, 2), name="pool5")(x)
 
-    # Classifier head — keep a moderate dropout level to avoid underfitting
+    # Classifier head — wider bottleneck preserves backbone features
     x = layers.GlobalAveragePooling2D(name="gap")(x)
-    x = layers.Dense(128, activation="relu", name="fc_bottleneck")(x)
+    x = layers.Dense(256, activation="relu", name="fc_bottleneck")(x)
     x = layers.Dropout(FINAL_DROPOUT_RATE, name="dropout")(x)
     outputs = layers.Dense(n_classes, activation="softmax", name="fc_out")(x)
-    return keras.Model(inputs, outputs, name="logmel_cnn_v2")
+    return keras.Model(inputs, outputs, name="logmel_cnn_v2_1")
 
 
 def _load_pretrained_genre_classes(model_path: Path) -> list[str] | None:
@@ -881,10 +959,6 @@ print(f"\nBuild model : {_section_times['7. Build model']:.2f}s")
 # %%
 _t0 = time.perf_counter()
 
-_run_ts = time.strftime("%Y%m%d-%H%M%S")
-RUN_DIR = MODELS_BASE_DIR / f"{RUN_FAMILY}-{_run_ts}"
-RUN_DIR.mkdir(parents=True, exist_ok=True)
-print(f"Run directory : {RUN_DIR}")
 print(f"Init mode     : {INIT_MODE}")
 if PRETRAINED_MODEL_PATH is not None:
     print(f"Warm-start mapping : source checkpoint={PRETRAINED_MODEL_PATH} -> destination run_dir={RUN_DIR}")
@@ -930,7 +1004,7 @@ lr_schedule = CosineAnnealingWithWarmup(warmup_steps, total_steps, LR_MAX, LR_MI
 
 
 def _build_optimizer():
-    return tf.keras.optimizers.AdamW(learning_rate=lr_schedule, weight_decay=WEIGHT_DECAY)
+    return tf.keras.optimizers.AdamW(learning_rate=lr_schedule, weight_decay=WEIGHT_DECAY, clipnorm=1.0)
 
 
 with tf.device(RUNTIME_DEVICE):
@@ -950,8 +1024,9 @@ def compile_training_model(current_model: keras.Model) -> None:
 
 
 def set_backbone_trainable(current_model: keras.Model, backbone_trainable: bool) -> None:
+    head_layers = {"fc_bottleneck", "fc_out"}
     for layer in current_model.layers:
-        layer.trainable = backbone_trainable or layer.name == "fc_out"
+        layer.trainable = backbone_trainable or layer.name in head_layers
 
 
 class _ValMacroF1(tf.keras.callbacks.Callback):
@@ -980,14 +1055,13 @@ class _ValMacroF1(tf.keras.callbacks.Callback):
         if logs is not None:
             logs["val_macro_f1"] = macro_f1
 
-        print(f"\n  [ValMacroF1] epoch {epoch + 1}: val_macro_f1 = {macro_f1:.4f}")
 
-
-class _TrainEvalAccuracy(tf.keras.callbacks.Callback):
+class _TrainEvalMetrics(tf.keras.callbacks.Callback):
     def __init__(self, train_eval_ds: tf.data.Dataset):
         super().__init__()
         self.train_eval_ds = train_eval_ds
         self.accuracy_history = []
+        self.f1_history = []
 
     def on_epoch_end(self, epoch, logs=None):
         y_true, y_pred = [], []
@@ -997,12 +1071,49 @@ class _TrainEvalAccuracy(tf.keras.callbacks.Callback):
             y_true.append(np.argmax(yb.numpy(), axis=1))
 
         train_eval_accuracy = float(accuracy_score(np.concatenate(y_true), np.concatenate(y_pred)))
+        train_eval_macro_f1 = float(
+            f1_score(
+                np.concatenate(y_true),
+                np.concatenate(y_pred),
+                average="macro",
+                zero_division=0,
+            )
+        )
         self.accuracy_history.append(train_eval_accuracy)
+        self.f1_history.append(train_eval_macro_f1)
 
         if logs is not None:
             logs["train_eval_accuracy"] = train_eval_accuracy
+            logs["train_eval_macro_f1"] = train_eval_macro_f1
 
-        print(f"  [TrainEval] epoch {epoch + 1}: train_eval_accuracy = {train_eval_accuracy:.4f}")
+
+class _EpochMetricsSummary(tf.keras.callbacks.Callback):
+    def __init__(self, max_epochs: int):
+        super().__init__()
+        self.max_epochs = max_epochs
+
+    def on_epoch_end(self, epoch, logs=None):
+        logs = logs or {}
+        train_loss = logs.get("loss")
+        val_loss = logs.get("val_loss")
+        train_acc = logs.get("train_eval_accuracy")
+        val_acc = logs.get("val_accuracy")
+        train_macro_f1 = logs.get("train_eval_macro_f1")
+        val_macro_f1 = logs.get("val_macro_f1")
+
+        acc_gap = None if train_acc is None or val_acc is None else float(train_acc) - float(val_acc)
+        f1_gap = None if train_macro_f1 is None or val_macro_f1 is None else float(train_macro_f1) - float(val_macro_f1)
+
+        def _fmt(value: float | None) -> str:
+            return "n/a" if value is None else f"{float(value):.4f}"
+
+        print(
+            "\n"
+            f"  [EpochSummary] {epoch + 1:03d}/{self.max_epochs:03d} "
+            f"train_loss={_fmt(train_loss)} val_loss={_fmt(val_loss)} "
+            f"train_acc={_fmt(train_acc)} val_acc={_fmt(val_acc)} acc_gap={_fmt(acc_gap)} "
+            f"train_macro_f1={_fmt(train_macro_f1)} val_macro_f1={_fmt(val_macro_f1)} f1_gap={_fmt(f1_gap)}"
+        )
 
 
 class _LRLogger(tf.keras.callbacks.Callback):
@@ -1033,13 +1144,15 @@ class _EpochTimer(tf.keras.callbacks.Callback):
 lr_logger = _LRLogger()
 epoch_timer = _EpochTimer()
 val_macro_f1_cb = _ValMacroF1(val_ds=val_ds)
-train_eval_acc_cb = _TrainEvalAccuracy(train_eval_ds=train_eval_ds)
+train_eval_metrics_cb = _TrainEvalMetrics(train_eval_ds=train_eval_ds)
+epoch_metrics_summary_cb = _EpochMetricsSummary(max_epochs=EPOCHS)
 
 
 def make_training_callbacks(enable_checkpointing: bool, enable_early_stopping: bool):
     stage_callbacks = [
         val_macro_f1_cb,
-        train_eval_acc_cb,
+        train_eval_metrics_cb,
+        epoch_metrics_summary_cb,
     ]
     if enable_checkpointing:
         stage_callbacks.append(
@@ -1057,7 +1170,7 @@ def make_training_callbacks(enable_checkpointing: bool, enable_early_stopping: b
             tf.keras.callbacks.EarlyStopping(
                 monitor="val_macro_f1",
                 mode="max",
-                patience=10,
+                patience=20,
                 restore_best_weights=False,
                 verbose=1,
             )
@@ -1173,7 +1286,7 @@ print(f"Best epoch by macro_F1 : {best_f1_epoch + 1}/{num_epochs}  (val_macro_f1
 _section_times["8. Compile & train"] = time.perf_counter() - _t0
 print(f"\nCompile & train : {_section_times['8. Compile & train']:.1f}s")
 
-model_path = RUN_DIR / "logmel_cnn_v2.keras"
+model_path = RUN_DIR / "logmel_cnn_v2_1.keras"
 model.save(str(model_path))
 np.savez(str(RUN_DIR / "norm_stats.npz"), mu=mu, std=std, genre_classes=np.array(GENRE_CLASSES))
 
@@ -1189,10 +1302,10 @@ epochs_range = range(1, len(hist["accuracy"]) + 1)
 
 fig, (ax_acc, ax_loss, ax_f1) = plt.subplots(1, 3, figsize=(18, 4))
 
-if train_eval_acc_cb.accuracy_history:
+if train_eval_metrics_cb.accuracy_history:
     ax_acc.plot(
         epochs_range,
-        train_eval_acc_cb.accuracy_history,
+        train_eval_metrics_cb.accuracy_history,
         label="Train (clean eval)",
         linewidth=2,
     )
@@ -1212,6 +1325,15 @@ ax_loss.legend(fontsize=8)
 ax_loss.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
 
 if val_macro_f1_cb.f1_history:
+    if train_eval_metrics_cb.f1_history:
+        ax_f1.plot(
+            epochs_range,
+            train_eval_metrics_cb.f1_history,
+            label="Train Macro-F1 (clean eval)",
+            linewidth=2,
+            color="seagreen",
+            linestyle="--",
+        )
     ax_f1.plot(epochs_range, val_macro_f1_cb.f1_history, label="Val Macro-F1", linewidth=2.5, color="darkorange")
     ax_f1.axvline(best_f1_epoch + 1, color="darkorange", linestyle=":", linewidth=1.5, label=f"Best F1 epoch ({best_f1_epoch + 1})")
     if best_loss_epoch != best_f1_epoch:
@@ -1227,7 +1349,7 @@ for axis in (ax_acc, ax_loss, ax_f1):
     for spine in ["top", "right"]:
         axis.spines[spine].set_visible(False)
 
-fig.suptitle("Training history — Log-Mel CNN v2")
+fig.suptitle("Training history — Log-Mel CNN v2.1")
 plt.tight_layout()
 plt.show()
 
@@ -1310,7 +1432,7 @@ cm = confusion_matrix(y_test_true, y_test_pred, labels=np.arange(N_CLASSES))
 fig, ax = plt.subplots(figsize=(13, 11))
 disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=GENRE_CLASSES)
 disp.plot(ax=ax, xticks_rotation=45, colorbar=True, cmap="Blues", values_format="d")
-ax.set_title("Confusion matrix — test set (logmel_cnn_v2)")
+ax.set_title("Confusion matrix — test set (logmel_cnn_v2_1)")
 plt.tight_layout()
 plt.show()
 
@@ -1385,6 +1507,9 @@ report = {
         "pretrained_mode": PRETRAINED_MODE if PRETRAINED_MODEL_PATH is not None else None,
     },
     "warm_start_comparison": _build_warm_start_comparison(),
+    "artifacts": {
+        "console_log": str(CONSOLE_LOG_PATH),
+    },
     "logmel_dataset_dir": str(LOGMEL_DATASET_DIR),
     "manifests": {
         "train": str(TRAIN_MANIFEST_PATH),
@@ -1431,7 +1556,8 @@ report = {
         "lr_max": LR_MAX,
         "best_epoch_val_loss": best_loss_epoch + 1,
         "best_epoch_macro_f1": best_f1_epoch + 1,
-        "train_eval_accuracy_per_epoch": train_eval_acc_cb.accuracy_history,
+        "train_eval_accuracy_per_epoch": train_eval_metrics_cb.accuracy_history,
+        "train_eval_macro_f1_per_epoch": train_eval_metrics_cb.f1_history,
         "lr_per_epoch": lr_logger.lrs,
         "seconds_per_epoch": epoch_timer.times,
     },
@@ -1440,16 +1566,19 @@ report = {
         "validation": val_metrics,
         "test": test_metrics,
     },
-    "changes_from_v1_1": {
-        "warm_start_support": "added via LOGMEL_CNN_PRETRAINED_MODEL",
-        "training_behavior": "fresh optimizer/schedule and new RUN_DIR even when initialized from a pretrained .keras model",
-        "compatibility_guardrails": "input shape, output dimension, and genre_classes order are validated before warm-start training",
-        "backbone_only_reset_warning": "prints an explicit warning when backbone_only resets fc_out despite matching class order",
-        "staged_backbone_freezing": "optional via --freeze-backbone-epochs / LOGMEL_CNN_FREEZE_BACKBONE_EPOCHS",
+    "changes_from_v2": {
+        "weight_decay": "1e-4 (was 5e-4) — lighter L2 with Mixup+dropout active",
+        "spec_aug_num_masks": "1 (was 2) — avoid overmasking combined with Mixup",
+        "spatial_dropout": "graduated 0.05/0.10/0.15/0.20 (was flat 0.10) — deeper layers get more regularization",
+        "bottleneck_units": "256 (was 128) — preserve full backbone feature space",
+        "final_dropout": "0.20 (was 0.25) — wider bottleneck absorbs capacity",
+        "gradient_clipping": "clipnorm=1.0 added to AdamW",
+        "class_weight_mixup": "pre-Mixup anchor-based weighting (was post-Mixup blended weighting)",
+        "early_stopping_patience": "20 (was 10) — allow cosine LR tail to refine",
     },
 }
 
-report_path = RUN_DIR / "run_report_logmel_cnn_v2.json"
+report_path = RUN_DIR / "run_report_logmel_cnn_v2_1.json"
 report_path.write_text(json.dumps(report, indent=2))
 print(f"Run report -> {report_path}")
 

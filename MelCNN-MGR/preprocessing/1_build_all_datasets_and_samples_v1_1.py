@@ -22,6 +22,10 @@ or the full pipeline in one run.
 The parquet outputs define a natural boundary between intermediate manifest
 generation and final training-manifest selection.
 
+During Stage 2, the additional-source sample manifest is deterministically
+shuffled with `--split-seed` before grouped final split assignment. Segment
+grouping still keeps all segments from the same source audio in the same split.
+
 Example commands
 ----------------
 Run Stage 1a for FMA only:
@@ -81,6 +85,10 @@ Each selected parquet is rebuilt from scratch and overwritten on rerun.
 The script uses settings.data_sampling_settings in MelCNN-MGR/settings.json:
     target_genres
     sample_length_sec
+
+If `sample_length_sec` is missing or invalid inside an otherwise valid
+`data_sampling_settings` object, the script falls back to 15.0 seconds.
+Unreadable settings files and invalid `target_genres` remain hard errors.
 
 Sampling rule
 -------------

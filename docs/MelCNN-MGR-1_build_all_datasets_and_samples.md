@@ -1,8 +1,8 @@
-# MelCNN-MGR `1_build_all_datasets_and_samples.py`
+# MelCNN-MGR `1_build_all_datasets_and_samples_v1_1.py`
 
 ## Purpose
 
-`MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py` is the manifest builder for the MelCNN-MGR data pipeline.
+`MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py` is the manifest builder for the MelCNN-MGR data pipeline.
 
 It sits inside the current production-like path:
 
@@ -11,7 +11,7 @@ download_by_genre_limits.py
   -> extract_mtg_processed_samples.py
 
 data sources: FMA + additional_datasets
-  -> 1_build_all_datasets_and_samples.py
+  -> 1_build_all_datasets_and_samples_v1_1.py
   -> 2_build_log_mel_dataset.py
   -> MelCNN_MGR_Manifest_LogMel_EDA.ipynb
   -> logmel_cnn_v1.py
@@ -19,11 +19,13 @@ data sources: FMA + additional_datasets
 
 The downloader and MTG/Jamendo extractor are upstream preparation steps for additional-source audio. This script is the point where FMA and `additional_datasets` first become one shared manifest contract.
 
-It creates the three core parquet artifacts used by downstream preprocessing and model training:
+It creates the five core parquet artifacts used by downstream preprocessing and model training:
 
-1. `manifest_all_datasets.parquet`
-2. `manifest_all_samples.parquet`
-3. `manifest_final_samples.parquet`
+1. `manifest_fma_datasets.parquet`
+2. `manifest_additional_datasets.parquet`
+3. `manifest_fma_all_samples.parquet`
+4. `manifest_additional_all_samples.parquet`
+5. `manifest_final_samples.parquet`
 
 At a high level, the script:
 
@@ -45,8 +47,10 @@ The script is best understood as a two-stage pipeline, and the CLI can execute S
 
 Stage 1 produces:
 
-1. `manifest_all_datasets.parquet`
-2. `manifest_all_samples.parquet`
+1. `manifest_fma_datasets.parquet`
+2. `manifest_additional_datasets.parquet`
+3. `manifest_fma_all_samples.parquet`
+4. `manifest_additional_all_samples.parquet`
 
 These files are the auditable intermediate products. They capture discovery, filtering, duration handling, and fixed-length segment expansion.
 
@@ -96,7 +100,7 @@ The relevant keys are:
 | Key | Meaning |
 | --- | --- |
 | `target_genres` | List of target genre labels to keep |
-| `sample_length_sec` | Fixed segment length used to build sample rows |
+| `sample_length_sec` | Fixed segment length used to build sample rows; falls back to `15.0` only if this field is missing or invalid inside an otherwise valid settings object |
 | `min_duration_delta` | Small tolerance used to derive the FMA minimum duration threshold |
 | `number_of_samples_expected_each_genre` | Per-genre target size for the final manifest |
 | `train_n_val_test_split_ratio_each_genre` | Fraction of final selected samples assigned to training |
@@ -117,7 +121,7 @@ The script exposes CLI arguments for all major input paths plus runtime options 
 | Argument | Meaning |
 | --- | --- |
 | `--settings` | Path to `settings.json` |
-| `--mode` | Execution mode: `stage1`, `stage2`, or `both` |
+| `--mode` | Execution mode: `stage1a`, `stage1b`, `stage1`, `stage2`, or `both` |
 | `--medium-manifest` | Path to cached FMA parquet manifest |
 | `--fma-metadata-root` | Path to FMA metadata folder |
 | `--fma-audio-root` | Path to FMA audio folder |
@@ -125,8 +129,12 @@ The script exposes CLI arguments for all major input paths plus runtime options 
 | `--min-duration` | Optional explicit minimum duration override |
 | `--force-rescan` | Rebuild FMA candidates from `tracks.csv` even if a cached parquet exists |
 | `--additional-root` | Path to additional datasets folder |
-| `--all-datasets-out` | Output path for `manifest_all_datasets.parquet` |
-| `--all-samples-out` | Output path for `manifest_all_samples.parquet` |
+| `--stage1a-sources` | Source selection for Stage 1a: `fma`, `additional`, or `both` |
+| `--stage1b-sources` | Source selection for Stage 1b: `fma`, `additional`, or `both` |
+| `--fma-datasets-out` | Output path for `manifest_fma_datasets.parquet` |
+| `--additional-datasets-out` | Output path for `manifest_additional_datasets.parquet` |
+| `--fma-all-samples-out` | Output path for `manifest_fma_all_samples.parquet` |
+| `--additional-all-samples-out` | Output path for `manifest_additional_all_samples.parquet` |
 | `--final-samples-out` | Output path for `manifest_final_samples.parquet` |
 | `--split-seed` | Random seed for deterministic final split assignment |
 | `--log-level` | Logging verbosity |
@@ -137,17 +145,19 @@ The script writes the following artifacts by default under `MelCNN-MGR/data/proc
 
 | Output | Purpose |
 | --- | --- |
-| `manifest_all_datasets.parquet` | Stage 1 output: one row per discovered audio candidate |
-| `manifest_all_samples.parquet` | Stage 1 output: one row per fixed-length segment |
+| `manifest_fma_datasets.parquet` | Stage 1a output: one row per discovered FMA audio candidate |
+| `manifest_additional_datasets.parquet` | Stage 1a output: one row per discovered additional-dataset audio candidate |
+| `manifest_fma_all_samples.parquet` | Stage 1b output: one row per fixed-length FMA segment |
+| `manifest_additional_all_samples.parquet` | Stage 1b output: one row per fixed-length additional-dataset segment |
 | `manifest_final_samples.parquet` | Stage 2 output: selected segment rows for final train/validation/test usage |
 
 Report/config behavior depends on mode:
 
 | Mode | Report/config base |
 | --- | --- |
-| `stage1` | `manifest_all_datasets.report.txt`, `manifest_all_datasets.config.json` |
+| `stage1` | report/config files are written next to the selected Stage 1a or Stage 1b output path |
 | `stage2` | `manifest_final_samples.report.txt`, `manifest_final_samples.config.json` |
-| `both` | `manifest_all_datasets.report.txt`, `manifest_all_datasets.config.json` |
+| `both` | `manifest_final_samples.report.txt`, `manifest_final_samples.config.json` |
 
 ## Execution modes
 
@@ -157,15 +167,13 @@ The CLI exposes the stage boundary directly with `--mode`.
 
 Runs only:
 
-1. FMA candidate build/load
-2. additional dataset scan
-3. combined dataset manifest generation
-4. segment expansion into `manifest_all_samples.parquet`
+1. selected Stage 1a source builds
+2. selected Stage 1b source builds
 
 Outputs written:
 
-1. `manifest_all_datasets.parquet`
-2. `manifest_all_samples.parquet`
+1. selected Stage 1a parquet outputs
+2. selected Stage 1b parquet outputs
 
 ### `--mode stage2`
 
@@ -173,7 +181,7 @@ Runs only final split assignment.
 
 Input requirement:
 
-1. an existing Stage 1 sample manifest at the path given by `--all-samples-out`
+1. existing Stage 1b per-source sample manifests at the paths given by `--fma-all-samples-out` and `--additional-all-samples-out`
 
 Outputs written:
 
@@ -246,7 +254,7 @@ The combined dataframe is then:
 2. deduplicated by `artifact_id`
 3. sorted by `genre_top`, `source`, `artifact_id`
 
-This final combined dataframe becomes `manifest_all_datasets.parquet`.
+These per-source dataset dataframes become `manifest_fma_datasets.parquet` and `manifest_additional_datasets.parquet`.
 
 ### Step 4: Build sample segments
 
@@ -271,7 +279,7 @@ Examples:
 1. `fma:4537:seg0000`
 2. `dortmund-university:Rock:additional_datasets/data/dortmund-university/rock/foo.wav:seg0001`
 
-These rows become `manifest_all_samples.parquet`.
+These rows become `manifest_fma_all_samples.parquet` or `manifest_additional_all_samples.parquet`, depending on source.
 
 At this point, Stage 1 is complete.
 
@@ -291,7 +299,8 @@ The resulting selected rows become `manifest_final_samples.parquet`.
 
 This is Stage 2.
 
-When `--mode stage2` is used, the script starts here by loading the existing Stage 1 sample manifest from `--all-samples-out`.
+When `--mode stage2` is used, the script starts here by loading the existing per-source Stage 1b sample manifests.
+Before grouped split assignment, the additional-source sample manifest is deterministically shuffled using `--split-seed`.
 
 ## Duration handling
 
@@ -386,7 +395,7 @@ Important details:
 4. the remaining rows are divided between validation and test
 5. grouping happens at source-audio level, not per segment
 
-This means `manifest_final_samples.parquet` is designed for downstream training consumption, while `manifest_all_datasets.parquet` remains the broader audit table.
+This means `manifest_final_samples.parquet` is designed for downstream training consumption, while the Stage 1a dataset manifests remain the broader audit tables.
 
 ## Reporting and reproducibility
 
@@ -416,7 +425,7 @@ This makes the preprocessing step reproducible and auditable.
 
 The tables below describe the parquet schemas written by this script. These schemas are derived from the current writer logic in the script.
 
-### `manifest_all_datasets.parquet`
+### `manifest_fma_datasets.parquet` and `manifest_additional_datasets.parquet`
 
 One row per discovered audio candidate across FMA and additional datasets.
 
@@ -438,7 +447,7 @@ One row per discovered audio candidate across FMA and additional datasets.
 | `sampling_exclusion_reason` | string or null | Why sampling is not possible even if the row exists in the dataset manifest |
 | `manifest_origin` | string | Provenance marker showing which manifest or source folder created the row |
 
-### `manifest_all_samples.parquet`
+### `manifest_fma_all_samples.parquet` and `manifest_additional_all_samples.parquet`
 
 One row per fixed-length segment generated from the eligible dataset rows.
 
@@ -485,8 +494,8 @@ Lean final training manifest. One row per selected segment.
 
 The script intentionally uses two identity levels:
 
-1. `artifact_id` for source-audio artifacts in `manifest_all_datasets.parquet`
-2. `sample_id` for fixed-length segment rows in `manifest_all_samples.parquet` and `manifest_final_samples.parquet`
+1. `artifact_id` for source-audio artifacts in the Stage 1a dataset manifests
+2. `sample_id` for fixed-length segment rows in the Stage 1b sample manifests and `manifest_final_samples.parquet`
 
 This avoids collisions that would happen if only integer `track_id` were used, while keeping the segment manifests focused on segment-level identities.
 
@@ -507,7 +516,7 @@ This keeps the final training manifest compact while retaining the key fields ne
 
 ### Why skipped files are still represented upstream
 
-The script does not try to hide unusable inputs. Instead, it keeps them in `manifest_all_datasets.parquet` with explicit reason codes.
+The script does not try to hide unusable inputs. Instead, it keeps them in the Stage 1a dataset manifests with explicit reason codes.
 
 That makes it possible to answer questions like:
 
@@ -520,7 +529,7 @@ This is critical for dataset auditing and rerun reproducibility.
 ## Typical execution example
 
 ```bash
-python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py \
+python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py \
   --mode both \
   --fma-subset medium \
   --log-level INFO
@@ -529,7 +538,7 @@ python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py \
 Stage 1 only:
 
 ```bash
-python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py \
+python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py \
   --mode stage1 \
   --fma-subset medium \
   --log-level INFO
@@ -538,9 +547,10 @@ python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py \
 Stage 2 only:
 
 ```bash
-python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py \
+python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py \
   --mode stage2 \
-  --all-samples-out MelCNN-MGR/data/processed/manifest_all_samples.parquet \
+  --fma-all-samples-out MelCNN-MGR/data/processed/manifest_fma_all_samples.parquet \
+  --additional-all-samples-out MelCNN-MGR/data/processed/manifest_additional_all_samples.parquet \
   --final-samples-out MelCNN-MGR/data/processed/manifest_final_samples.parquet \
   --log-level INFO
 ```
@@ -548,7 +558,7 @@ python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py \
 To force a rebuild from `tracks.csv` instead of using a cached FMA parquet:
 
 ```bash
-python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py \
+python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py \
   --mode both \
   --fma-subset medium \
   --force-rescan \
@@ -569,7 +579,7 @@ That downstream stage expects the segment-level final manifest and relies on fie
 6. `final_split`
 7. `reason_code`
 
-As a result, `1_build_all_datasets_and_samples.py` defines the ground truth for which audio segments enter later feature extraction and model training.
+As a result, `1_build_all_datasets_and_samples_v1_1.py` defines the ground truth for which audio segments enter later feature extraction and model training.
 
 ## Practical summary
 
@@ -581,6 +591,6 @@ If you want to understand this script operationally, think of it as three things
 
 Its main contract is simple:
 
-1. `manifest_all_datasets.parquet` tells you what exists and why it is usable or skipped
-2. `manifest_all_samples.parquet` tells you which fixed-length segments can be generated
+1. the Stage 1a dataset manifests tell you what exists and why it is usable or skipped
+2. the Stage 1b sample manifests tell you which fixed-length segments can be generated
 3. `manifest_final_samples.parquet` tells downstream stages exactly which segment rows to use
