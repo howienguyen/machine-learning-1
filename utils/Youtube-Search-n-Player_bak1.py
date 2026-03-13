@@ -3,7 +3,7 @@
 Runs a small Flask web UI that searches YouTube via the YouTube Data API v3
 and embeds a selected video for playback.
 
-Theme/colors are intentionally matched to `web_audio_capture.py`.
+Theme/colors are intentionally matched to `utils/web_audio_capture.py`.
 
 Environment:
   - GOOGLE_DEVELOPER_API_KEY: YouTube Data API v3 key
@@ -28,7 +28,7 @@ app = Flask(__name__)
 
 
 def _theme_css() -> str:
-    """CSS copied from `web_audio_capture.py` to keep consistent theme."""
+    """CSS copied from `utils/web_audio_capture.py` to keep consistent theme."""
     return """
         :root {
             --bg: #0B0F14;

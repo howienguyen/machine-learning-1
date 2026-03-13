@@ -1,7 +1,7 @@
-"""audio_backend.py — Audio processing backend for web_audio_capture.py.
+"""utils/audio_backend.py — Audio processing backend for web_audio_capture.py.
 
 This module is intentionally decoupled from the Flask layer.
-Integration points called by web_audio_capture.py:
+Integration points called by utils/web_audio_capture.py:
 
     on_capture_started(sample_rate, channels)
         Called once when the WASAPI loopback stream opens successfully.

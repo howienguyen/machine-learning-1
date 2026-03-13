@@ -58,15 +58,15 @@ import re
 _SCRIPT_DIR = Path(__file__).resolve().parent           # …/preprocessing
 _MELCNN_DIR = _SCRIPT_DIR.parent                        # …/MelCNN-MGR
 
-DEFAULT_PROCESSED_DIR = _MELCNN_DIR / "data" / "processed"
+DEFAULT_PROCESSED_DIR = _MELCNN_DIR / "data" / "processed_baseline"
 DEFAULT_OUTPUT_SUBSET = "tiny"
 DEFAULT_SEED = 42
 DEFAULT_GENRE_COL = "genre_top"
 DEFAULT_SOURCE_NAME = "fma"
 
-DEFAULT_TRAIN_PER_GENRE = 70
-DEFAULT_VAL_PER_GENRE = 15
-DEFAULT_TEST_PER_GENRE = 15
+DEFAULT_TRAIN_PER_GENRE = 369
+DEFAULT_VAL_PER_GENRE = 56
+DEFAULT_TEST_PER_GENRE = 56
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

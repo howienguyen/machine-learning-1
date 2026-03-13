@@ -200,7 +200,7 @@ _start_console_capture(CONSOLE_LOG_PATH)
 print(f"Run directory : {RUN_DIR}")
 print(f"Console log   : {CONSOLE_LOG_PATH}")
 
-EPOCHS = int(os.environ.get("LOGMEL_CNN_EPOCHS", "102"))
+EPOCHS = int(os.environ.get("LOGMEL_CNN_EPOCHS", "99"))
 BATCH_SIZE = int(os.environ.get("LOGMEL_CNN_BATCH_SIZE", "32"))
 LABEL_SMOOTHING = 0.0            # Mixup already softens labels; keep CE targets sharp otherwise
 WEIGHT_DECAY = 1e-4                # v2.1: 1e-4 (was v2: 5e-4) — lighter with Mixup+dropout active
@@ -1170,7 +1170,9 @@ def make_training_callbacks(enable_checkpointing: bool, enable_early_stopping: b
             tf.keras.callbacks.EarlyStopping(
                 monitor="val_macro_f1",
                 mode="max",
-                patience=20,
+                patience=9,
+                min_delta=0.002,
+                start_from_epoch=36,
                 restore_best_weights=False,
                 verbose=1,
             )

@@ -16,7 +16,7 @@ In MelCNN MGR, it’s preferable (though not strictly required) that train/valid
 
 **Step 2a — Build the metadata manifest (one-time preprocessing step):**
 
-Script: MelCNN-MGR\preprocessing\build_manifest.py
+Script: MelCNN-MGR\Lab\build_manifest.py
   - Implements the four-phase pipeline from docs/MelCNN-MGR-Preprocessing.md:
       Phase A: collect candidates from tracks.csv (metadata-first)
       Phase B: resolve filepaths + check filesystem existence
@@ -31,13 +31,13 @@ Script: MelCNN-MGR\preprocessing\build_manifest.py
       metadata_manifest_report_medium.txt  — quality-gate summary (reason codes, genre/split distribution, artist-leakage check)
 
 Run (must be done before the training script):
-  python MelCNN-MGR/preprocessing/build_manifest.py                      # defaults: subset=medium
-  python MelCNN-MGR/preprocessing/build_manifest.py --subset medium
-  python MelCNN-MGR/preprocessing/build_manifest.py --subset medium --decode-probe   # also probe audio headers
+  python MelCNN-MGR/Lab/build_manifest.py                      # defaults: subset=medium
+  python MelCNN-MGR/Lab/build_manifest.py --subset medium
+  python MelCNN-MGR/Lab/build_manifest.py --subset medium --decode-probe   # also probe audio headers
 
 **Step 2b — Train the MFCC CNN baseline (reads from manifest, no raw metadata needed):**
 
-Script: MelCNN-MGR\baseline_mfcc_cnn_v2.py  ← current version
+Script: MelCNN-MGR\Lab\baseline_mfcc_cnn_v2.py  ← current version
   - Reads train/val/test splits from MelCNN-MGR/data/processed/{split}_medium.parquet
   - Faithfully reproduces FMA baselines.ipynb §3.1 "ConvNet on MFCC"
   - Architecture: (13, 2582, 1) → Conv2D(3) → Conv2D(15) → Conv2D(65) → Dense(16, softmax)
@@ -47,11 +47,11 @@ Script: MelCNN-MGR\baseline_mfcc_cnn_v2.py  ← current version
   - Outputs: accuracy + Macro-F1 + per-genre F1, model → MelCNN-MGR/models/, results → MelCNN-MGR/results/
 
 Run:
-  python MelCNN-MGR\baseline_mfcc_cnn_v2.py
-  python MelCNN-MGR\baseline_mfcc_cnn_v2.py --epochs 20 --batch-size 16
-  python MelCNN-MGR\baseline_mfcc_cnn_v2.py --clear-cache   # force MFCC re-extraction
+  python MelCNN-MGR\Lab\baseline_mfcc_cnn_v2.py
+  python MelCNN-MGR\Lab\baseline_mfcc_cnn_v2.py --epochs 20 --batch-size 16
+  python MelCNN-MGR\Lab\baseline_mfcc_cnn_v2.py --clear-cache   # force MFCC re-extraction
 
-Note: MelCNN-MGR\baseline_mfcc_cnn_v1.py is the original standalone version (reads tracks.csv directly, no manifest). Kept for reference only.
+Note: MelCNN-MGR\Lab\baseline_mfcc_cnn_v1.py is the original standalone version (reads tracks.csv directly, no manifest). Kept for reference only.
 
 3. Log-mel + CNN: using the **same CNN architecture** and the **same training setup** (MelCNN-MGR/data/processed) as the MFCC CNN baseline solution (MelCNN-MGR/model_training/baseline_mfcc_cnn_v5.ipynb) uses, changing only the input representation.
 3.1. Developing the Log-mel + CNN solution (i.e the training notebook for Log-mel + CNN, just like we have baseline_mfcc_cnn_v5.ipynb) --> DONE
@@ -98,21 +98,21 @@ that can be run independently of the training notebooks/scripts.
 
 4.1. Log-Mel CNN v20a inference module → DONE
   Files:
-    MelCNN-MGR/inference_logmel_v20a.py         ← MelCNNInference class
-    MelCNN-MGR/examples/inference_logmel_v20a_example.py
+    MelCNN-MGR/Lab/inference_logmel_v20a.py         ← MelCNNInference class
+    MelCNN-MGR/Lab/examples/inference_logmel_v20a_example.py
   Loads: baseline_logmel_cnn_v20a.keras + norm_stats.npz from a logmel-cnn-v20a-* run dir
   Default mode: three_crop (3 × 10s clips, averaged)
   Run:
-    python MelCNN-MGR/examples/inference_logmel_v20a_example.py \
+    python MelCNN-MGR/Lab/examples/inference_logmel_v20a_example.py \
         --run-dir MelCNN-MGR/models/logmel-cnn-v20a-<ts> --subset small --random 5
 
 4.2. MFCC CNN v5 inference module → DONE
   Files:
-    MelCNN-MGR/inference_mfcc_v5.py              ← MFCCCNNInference class
-    MelCNN-MGR/examples/inference_mfcc_v5_example.py
+    MelCNN-MGR/Lab/inference_mfcc_v5.py              ← MFCCCNNInference class
+    MelCNN-MGR/Lab/examples/inference_mfcc_v5_example.py
   Loads: baseline_mfcc_cnn.keras + norm_stats.npz from a mfcc-cnn-* run dir
   Default mode: single_crop (full 30s clip)
   Prerequisite: norm_stats.npz is now saved by baseline_mfcc_cnn_v5.ipynb (Section 7)
   Run:
-    python MelCNN-MGR/examples/inference_mfcc_v5_example.py \
+    python MelCNN-MGR/Lab/examples/inference_mfcc_v5_example.py \
         --run-dir MelCNN-MGR/models/mfcc-cnn-<ts> --subset small --random 5

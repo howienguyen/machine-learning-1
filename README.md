@@ -39,16 +39,17 @@ All training notebooks/scripts read from pre-built parquet manifests under
 Build the `small` manifest:
 
 ```bash
-python MelCNN-MGR/preprocessing/build_manifest.py --subset small
+python MelCNN-MGR/Lab/build_manifest.py --subset small
 ```
 
 Build the `medium` manifest:
 
 ```bash
-python MelCNN-MGR/preprocessing/build_manifest.py --subset medium
+python MelCNN-MGR/Lab/build_manifest.py --subset medium
 ```
 
 > [!IMPORTANT]
+> The research/legacy manifest builder now lives at `MelCNN-MGR/Lab/build_manifest.py`.
 > When `--audio-root` is omitted, `build_manifest.py` now derives it from `--subset` automatically:
 > `small -> FMA/fma_small`, `medium -> FMA/fma_medium`, `large -> FMA/fma_large`.
 > Pass `--audio-root` explicitly only when you want to override that mapping.
@@ -65,34 +66,34 @@ Current manifest behavior:
 After the FMA metadata manifest exists, build the MelCNN-MGR unified manifests:
 
 ```bash
-python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py
+python MelCNN-MGR/Lab/1_build_all_datasets_and_samples.py
 ```
 
 Run Stage 1 only to produce the intermediate manifests:
 
 ```bash
-python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py \
+python MelCNN-MGR/Lab/1_build_all_datasets_and_samples.py \
     --mode stage1
 ```
 
 Run Stage 2 only to consume an existing `manifest_all_samples.parquet` and rebuild just the final manifest:
 
 ```bash
-python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py \
+python MelCNN-MGR/Lab/1_build_all_datasets_and_samples.py \
     --mode stage2
 ```
 
 Run both stages explicitly:
 
 ```bash
-python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py \
+python MelCNN-MGR/Lab/1_build_all_datasets_and_samples.py \
     --mode both
 ```
 
 Run with explicit FMA subset and INFO logging:
 
 ```bash
-python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py \
+python MelCNN-MGR/Lab/1_build_all_datasets_and_samples.py \
     --mode both \
     --fma-subset medium \
     --log-level INFO
@@ -101,7 +102,7 @@ python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py \
 Force an FMA rescan from `tracks.csv` instead of reusing the cached metadata parquet:
 
 ```bash
-python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py \
+python MelCNN-MGR/Lab/1_build_all_datasets_and_samples.py \
     --mode both \
     --fma-subset medium \
     --force-rescan \
@@ -128,7 +129,7 @@ Report and config outputs depend on mode:
 Use custom output locations if needed:
 
 ```bash
-python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py \
+python MelCNN-MGR/Lab/1_build_all_datasets_and_samples.py \
     --mode both \
     --all-datasets-out /tmp/manifest_all_datasets.parquet \
     --all-samples-out /tmp/manifest_all_samples.parquet \
@@ -138,7 +139,7 @@ python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py \
 For Stage 2-only runs, `--all-samples-out` acts as the input path of the existing Stage 1 sample manifest:
 
 ```bash
-python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py \
+python MelCNN-MGR/Lab/1_build_all_datasets_and_samples.py \
     --mode stage2 \
     --all-samples-out /tmp/manifest_all_samples.parquet \
     --final-samples-out /tmp/manifest_final_samples.parquet
@@ -181,7 +182,7 @@ Why clear `MelCNN-MGR/cache/`:
 After rebuilding both manifests, generate the supplementation candidate JSON:
 
 ```bash
-python MelCNN-MGR/preprocessing/collect_extra_samples_for_small_dataset.py
+python MelCNN-MGR/Lab/collect_extra_samples_for_small_dataset.py
 ```
 
 This writes:
@@ -202,7 +203,7 @@ Configuration lives in `MelCNN-MGR/settings.json` under `small_dataset_supplemen
 After generating `extra_samples_for_small_dataset.json`, run:
 
 ```bash
-python MelCNN-MGR/preprocessing/load_extra_samples_for_small_dataset_splits.py
+python MelCNN-MGR/Lab/load_extra_samples_for_small_dataset_splits.py
 ```
 
 This script reads:
@@ -227,7 +228,7 @@ Current behavior:
 Example dry run to a separate directory:
 
 ```bash
-python MelCNN-MGR/preprocessing/load_extra_samples_for_small_dataset_splits.py \
+python MelCNN-MGR/Lab/load_extra_samples_for_small_dataset_splits.py \
     --out-dir /tmp/melcnn_small_extra_splits
 ```
 
@@ -381,19 +382,19 @@ without re-running the training notebook.
 
 | Training source | Inference module | Example usage script |
 |---|---|---|
-| `baseline_logmel_cnn_v21.py` | `MelCNN-MGR/inference_logmel_v20a1.py` | `MelCNN-MGR/examples/inference_v20a1_v21_batch.py` |
-| `baseline_logmel_cnn_v20a1.py` | `MelCNN-MGR/inference_logmel_v20a1.py` | `MelCNN-MGR/examples/inference_v20a1_v21_batch.py` |
-| `baseline_logmel_cnn_v20a.py` | `MelCNN-MGR/inference_logmel_v20a.py` | `MelCNN-MGR/examples/inference_logmel_v20a_example.py` |
-| `baseline_logmel_cnn_v20.ipynb` | `MelCNN-MGR/inference_logmel_v20.py` | `MelCNN-MGR/examples/inference_logmel_v20_example.py` |
-| `baseline_mfcc_cnn_v5.ipynb` | `MelCNN-MGR/inference_mfcc_v5.py` | `MelCNN-MGR/examples/inference_mfcc_v5_example.py` |
+| `baseline_logmel_cnn_v21.py` | `MelCNN-MGR/Lab/inference_logmel_v20a1.py` | `MelCNN-MGR/Lab/examples/inference_v20a1_v21_batch.py` |
+| `baseline_logmel_cnn_v20a1.py` | `MelCNN-MGR/Lab/inference_logmel_v20a1.py` | `MelCNN-MGR/Lab/examples/inference_v20a1_v21_batch.py` |
+| `baseline_logmel_cnn_v20a.py` | `MelCNN-MGR/Lab/inference_logmel_v20a.py` | `MelCNN-MGR/Lab/examples/inference_logmel_v20a_example.py` |
+| `baseline_logmel_cnn_v20.ipynb` | `MelCNN-MGR/Lab/inference_logmel_v20.py` | `MelCNN-MGR/Lab/examples/inference_logmel_v20_example.py` |
+| `baseline_mfcc_cnn_v5.ipynb` | `MelCNN-MGR/Lab/inference_mfcc_v5.py` | `MelCNN-MGR/Lab/examples/inference_mfcc_v5_example.py` |
 
 > [!NOTE]
-> `inference_logmel_v20a1.py` is the most robust and features built-in custom schedule registration. It is used for both v20a1 (10s) and v21 (15s) models.
+> `MelCNN-MGR/Lab/inference_logmel_v20a1.py` is the most robust legacy inference module and is used for both v20a1 (10s) and v21 (15s) models.
 
 **Example usage (v20a1/v21 Batch):**
 ```bash
 # Process several files using v21 (15s) model
-python MelCNN-MGR/examples/inference_v20a1_v21_batch.py \
+python MelCNN-MGR/Lab/examples/inference_v20a1_v21_batch.py \
     --run-dir MelCNN-MGR/models/logmel-cnn-v21-20260309-120000 \
     --files track1.mp3 track2.wav
 ```
@@ -407,23 +408,26 @@ for full documentation.
 
 ```
 MelCNN-MGR/
+├── Lab/
+│   ├── build_manifest.py                   ← Research/legacy metadata preprocessing
+│   ├── 1_build_all_datasets_and_samples.py ← Research unified manifest builder
+│   ├── inference_logmel_v20a.py            ← Inference module for v20a
+│   ├── inference_logmel_v20.py             ← Inference module for v20
+│   ├── inference_mfcc_v5.py                ← Inference module for MFCC v5
+│   └── examples/
+│       ├── inference_logmel_v20a_example.py
+│       ├── inference_logmel_v20_example.py
+│       └── inference_mfcc_v5_example.py
 ├── model_training/
 │   ├── baseline_mfcc_cnn_v5.ipynb          ← MFCC baseline (Goal 1)
 │   ├── baseline_logmel_cnn_v10.ipynb       ← Log-Mel baseline (Goal 1, representation-fair)
 │   ├── baseline_logmel_cnn_v20a.py         ← Quality-improved Log-Mel (Goal 2)
 │   └── baseline_logmel_cnn_v20.ipynb       ← Log-Mel 10s center-crop (intermediate)
 ├── preprocessing/
-│   └── build_manifest.py                   ← One-time metadata preprocessing
-├── inference_logmel_v20a.py                ← Inference module for v20a
-├── inference_logmel_v20.py                 ← Inference module for v20
-├── inference_mfcc_v5.py                    ← Inference module for MFCC v5
-├── examples/
-│   ├── inference_logmel_v20a_example.py
-│   ├── inference_logmel_v20_example.py
-│   └── inference_mfcc_v5_example.py
+│   └── ...                                 ← Current production preprocessing scripts
 ├── models/                                 ← Timestamped run directories (gitignored)
 ├── cache/                                  ← Per-track .npy feature cache (gitignored)
-└── data/processed/                         ← Manifest parquets from build_manifest.py
+└── data/processed/                         ← Manifest parquets from Lab/build_manifest.py and related builders
 FMA/
 ├── fma_small/                              ← Audio files (8 genres)
 ├── fma_medium/                             ← Audio files (16 genres)

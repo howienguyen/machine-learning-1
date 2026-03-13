@@ -41,7 +41,7 @@ MELCNN_DIR = SERVICE_DIR.parent
 if str(MELCNN_DIR) not in sys.path:
     sys.path.insert(0, str(MELCNN_DIR))
 
-from inference_logmel_cnn_v2_1 import (
+from model_inference.inference_logmel_cnn_v2_1 import (
     AUDIO_BACKEND,
     LogMelCNNV21Inference,
     PredictionResult,

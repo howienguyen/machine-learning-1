@@ -1058,6 +1058,8 @@ def make_training_callbacks(enable_checkpointing: bool, enable_early_stopping: b
                 monitor="val_macro_f1",
                 mode="max",
                 patience=10,
+                min_delta=0.002,
+                start_from_epoch=39,
                 restore_best_weights=False,
                 verbose=1,
             )

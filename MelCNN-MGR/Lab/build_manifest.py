@@ -80,7 +80,7 @@ _MELCNN_DIR    = _SCRIPT_DIR.parent                       # …/MelCNN-MGR
 _WORKSPACE     = _MELCNN_DIR.parent                       # …/machine-learning-1
 
 DEFAULT_METADATA_ROOT = _WORKSPACE / "FMA" / "fma_metadata"
-DEFAULT_OUT_DIR       = _MELCNN_DIR / "data" / "processed"
+DEFAULT_OUT_DIR       = _MELCNN_DIR / "data" / "processed_baseline"
 DEFAULT_SUBSET        = "small"   # one of "small", "medium", "large"
 DEFAULT_SOURCE_NAME   = "fma"
 

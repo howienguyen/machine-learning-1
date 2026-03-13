@@ -7,7 +7,7 @@
 It sits inside the current production-like path:
 
 ```text
-download_by_genre_limits.py
+utils/download_by_genre_limits.py
   -> extract_mtg_processed_samples.py
 
 data sources: FMA + additional_datasets

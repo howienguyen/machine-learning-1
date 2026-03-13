@@ -17,7 +17,7 @@ The project now has a canonical production-like path that extends beyond the ori
 ### Upstream additional-data preparation
 
 ```text
-download_by_genre_limits.py
+utils/download_by_genre_limits.py
     -> extract_mtg_processed_samples.py
 ```
 
@@ -27,7 +27,7 @@ This prepares MTG/Jamendo-derived audio under `additional_datasets/data` so it c
 
 ```text
 data sources: FMA + additional_datasets
-    -> MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py
+    -> MelCNN-MGR/Lab/1_build_all_datasets_and_samples.py
     -> MelCNN-MGR/preprocessing/2_build_log_mel_dataset.py
     -> MelCNN-MGR/model_training/MelCNN_MGR_Manifest_LogMel_EDA.ipynb
     -> MelCNN-MGR/model_training/logmel_cnn_v1.py
@@ -218,7 +218,7 @@ The audio array returned by `librosa.load` has the correct length and the MFCC m
 | How many tracks are affected? | ~1–5 % of FMA; one corrupt track can print the message dozens of times |
 | Does it affect reproducibility? | No — same corrupt file → same zeroed frames every run |
 
-### The fix (in `baseline_mfcc_cnn_v2.py` / `.ipynb`)
+### The fix (in `MelCNN-MGR/Lab/baseline_mfcc_cnn_v2.py` / `MelCNN-MGR/Lab/model-training/baseline_mfcc_cnn_v2.ipynb`)
 
 The only reliable way to detect the C-level message in-process on Linux is to temporarily replace OS file descriptor 2 with a pipe during `librosa.load()`, then scan the pipe contents for libmpg123 error strings after decoding completes. fd 2 is always restored in a `finally` block.
 

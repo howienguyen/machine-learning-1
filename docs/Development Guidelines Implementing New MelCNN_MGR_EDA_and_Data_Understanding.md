@@ -23,11 +23,11 @@ The notebook is not meant to train a model. Its job is to help you understand th
 It belongs in the current production-like chain here:
 
 ```text
-download_by_genre_limits.py
+utils/download_by_genre_limits.py
 	-> extract_mtg_processed_samples.py
 
 data sources: FMA + additional_datasets
-	-> 1_build_all_datasets_and_samples.py
+	-> MelCNN-MGR/Lab/1_build_all_datasets_and_samples.py
 	-> 2_build_log_mel_dataset.py
 	-> MelCNN_MGR_Manifest_LogMel_EDA.ipynb
 	-> logmel_cnn_v1.py
@@ -63,7 +63,7 @@ For the current project, that mental model should be extended one step further d
 
 ## 3. Why this notebook matters in the pipeline
 
-`1_build_all_datasets_and_samples.py` sits between raw audio collections and downstream feature extraction. Its responsibilities are to:
+`MelCNN-MGR/Lab/1_build_all_datasets_and_samples.py` sits between raw audio collections and downstream feature extraction. Its responsibilities are to:
 
 * discover in-scope audio files;
 * normalize source metadata into a shared schema;

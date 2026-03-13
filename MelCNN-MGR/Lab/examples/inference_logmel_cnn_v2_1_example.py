@@ -11,11 +11,15 @@ import sys
 from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
-_MELCNN_DIR = _SCRIPT_DIR.parent
+_MELCNN_DIR = _SCRIPT_DIR.parents[2]
 _WORKSPACE_DIR = _MELCNN_DIR.parent
 sys.path.insert(0, str(_MELCNN_DIR))
 
-from inference_logmel_cnn_v2_1 import AUDIO_BACKEND, LogMelCNNV21Inference, PredictionResult
+from model_inference.inference_logmel_cnn_v2_1 import (
+    AUDIO_BACKEND,
+    LogMelCNNV21Inference,
+    PredictionResult,
+)
 
 
 # Hardcoded example settings.

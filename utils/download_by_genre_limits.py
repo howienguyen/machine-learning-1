@@ -2,9 +2,9 @@
 
 README-style usage examples:
 
-    python download_by_genre_limits.py
+    python utils/download_by_genre_limits.py
 
-    python download_by_genre_limits.py \
+    python utils/download_by_genre_limits.py \
         --mode retry-failed \
         --failed-tsv genre_downloads/failed_20260310-120000-pid1234.tsv
 
@@ -66,8 +66,8 @@ def parse_args() -> argparse.Namespace:
         ),
         epilog=(
             "Examples:\n"
-            "  python download_by_genre_limits.py\n"
-            "  python download_by_genre_limits.py --mode retry-failed "
+            "  python utils/download_by_genre_limits.py\n"
+            "  python utils/download_by_genre_limits.py --mode retry-failed "
             "--failed-tsv genre_downloads/failed_20260310-120000-pid1234.tsv"
         ),
         formatter_class=argparse.RawTextHelpFormatter,

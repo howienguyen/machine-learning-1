@@ -17,7 +17,7 @@ The production-like path should now be understood as two connected chains.
 ### Upstream MTG/Jamendo acquisition chain
 
 ```text
-download_by_genre_limits.py
+utils/download_by_genre_limits.py
     -> extract_mtg_processed_samples.py
 ```
 
@@ -52,7 +52,7 @@ The current default path is:
 
 ## Practical interpretation
 
-### What `download_by_genre_limits.py` and `extract_mtg_processed_samples.py` do
+### What `utils/download_by_genre_limits.py` and `extract_mtg_processed_samples.py` do
 
 They prepare additional-source audio before MelCNN-MGR preprocessing begins.
 

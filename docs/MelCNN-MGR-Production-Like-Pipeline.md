@@ -51,7 +51,7 @@ The full production-like pipeline consists of five logical stages connected by w
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                     UPSTREAM DATA ACQUISITION                          │
 │                                                                        │
-│   download_by_genre_limits.py                                          │
+│   utils/download_by_genre_limits.py                                          │
 │        │                                                               │
 │        ▼                                                               │
 │   genre_downloads/  (Jamendo MP3s by genre folder)                     │
@@ -116,8 +116,8 @@ The full production-like pipeline consists of five logical stages connected by w
                              ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │  INFERENCE                                                             │
-│  MelCNN-MGR/inference_logmel_v20a.py  (MelCNNInference class)          │
-│  MelCNN-MGR/examples/inference_logmel_v20a_example.py                  │
+│  MelCNN-MGR/Lab/inference_logmel_v20a.py  (MelCNNInference class)      │
+│  MelCNN-MGR/Lab/examples/inference_logmel_v20a_example.py              │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -127,7 +127,7 @@ The full production-like pipeline consists of five logical stages connected by w
 
 ## 3. Stage 0: Data Acquisition — Jamendo Track Downloading
 
-**Script:** `download_by_genre_limits.py` (workspace root, ~487 lines)
+**Script:** `utils/download_by_genre_limits.py` (workspace root, ~487 lines)
 
 ### Purpose
 
@@ -164,10 +164,10 @@ Download Creative-Commons licensed music tracks from the [Jamendo](https://www.j
 
 ```bash
 # Fresh download
-python download_by_genre_limits.py
+python utils/download_by_genre_limits.py
 
 # Retry previously failed downloads
-python download_by_genre_limits.py --mode retry-failed --failed-tsv genre_downloads/failed_<run_id>.tsv
+python utils/download_by_genre_limits.py --mode retry-failed --failed-tsv genre_downloads/failed_<run_id>.tsv
 ```
 
 ---
@@ -753,8 +753,8 @@ The script auto-detects the best available device (GPU > XPU > CPU) and configur
 
 ## 10. Inference
 
-**Module:** `MelCNN-MGR/inference_logmel_v20a.py`
-**Example:** `MelCNN-MGR/examples/inference_logmel_v20a_example.py`
+**Module:** `MelCNN-MGR/Lab/inference_logmel_v20a.py`
+**Example:** `MelCNN-MGR/Lab/examples/inference_logmel_v20a_example.py`
 
 ### Purpose
 
@@ -782,7 +782,7 @@ The `three_crop` mode generally yields higher accuracy by reducing the dependenc
 ### Usage
 
 ```python
-from inference_logmel_v20a import MelCNNInference
+from MelCNN-MGR.Lab.inference_logmel_v20a import MelCNNInference
 
 engine = MelCNNInference("MelCNN-MGR/models/logmel-cnn-v20a-<timestamp>")
 result = engine.predict("path/to/audio.mp3", mode="three_crop")
@@ -795,7 +795,7 @@ print(result.top_k(3))     # Top 3 genre predictions with probabilities
 ### CLI Example
 
 ```bash
-python MelCNN-MGR/examples/inference_logmel_v20a_example.py \
+python MelCNN-MGR/Lab/examples/inference_logmel_v20a_example.py \
     --run-dir MelCNN-MGR/models/logmel-cnn-v20a-<ts> \
     --subset small --random 5
 ```
@@ -855,7 +855,7 @@ From these settings, the pipeline derives:
 ```
 machine-learning-1/                              ← Workspace root
 │
-├── download_by_genre_limits.py                  ← [Stage 0]  Jamendo downloader
+├── utils/download_by_genre_limits.py                  ← [Stage 0]  Jamendo downloader
 ├── extract_mtg_processed_samples.py             ← [Stage 0.5] Segment extractor
 │
 ├── FMA/
@@ -916,9 +916,10 @@ machine-learning-1/                              ← Workspace root
 │   │       ├── norm_stats.npz
 │   │       └── run_report_logmel_cnn_v1.json
 │   │
-│   ├── inference_logmel_v20a.py                 ← Inference module
-│   └── examples/
-│       └── inference_logmel_v20a_example.py     ← Inference CLI example
+│   ├── Lab/
+│   │   ├── inference_logmel_v20a.py             ← Inference module
+│   │   └── examples/
+│   │       └── inference_logmel_v20a_example.py ← Inference CLI example
 │
 └── docs/
     └── MelCNN-MGR-Production-Like-Pipeline.md   ← This document

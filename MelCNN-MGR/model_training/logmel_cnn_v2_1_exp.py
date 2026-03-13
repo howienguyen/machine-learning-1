@@ -204,11 +204,11 @@ print(f"Console log   : {CONSOLE_LOG_PATH}")
 EPOCHS = int(os.environ.get("LOGMEL_CNN_EPOCHS", "102"))
 BATCH_SIZE = int(os.environ.get("LOGMEL_CNN_BATCH_SIZE", "32"))
 LABEL_SMOOTHING = 0.0            # Mixup already softens labels; keep CE targets sharp otherwise
-WEIGHT_DECAY = 1e-4                # v2.1: 1e-4 (was v2: 5e-4) — lighter with Mixup+dropout active
+WEIGHT_DECAY = 2e-4                # v2.1: 1e-4 (was v2: 5e-4) — lighter with Mixup+dropout active
 
 SPEC_AUG_FREQ_MASK = 16            # v2.1-exp: experimental softer SpecAugment frequency mask (was v2.1: 24)
 SPEC_AUG_TIME_MASK = 25            # v2.1-exp: experimental softer SpecAugment time mask (was v2.1: 40)
-SPEC_AUG_NUM_MASKS = 1             # v2.1: 1 (was v2: 2) — avoid overmasking with Mixup
+SPEC_AUG_NUM_MASKS = 2             # v2.1: 1 (was v2: 2) — avoid overmasking with Mixup
 
 MAX_CLASS_WEIGHT = 1.5             # cap class weights to prevent over-prediction
 MIXUP_ALPHA = 0.3                  # keep the v2 Mixup blending parameter unchanged

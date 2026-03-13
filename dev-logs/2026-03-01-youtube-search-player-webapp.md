@@ -8,11 +8,11 @@ This log captures the full path we took in this workspace, from the very first Y
 2. Build a Flask + WASAPI loopback audio app for Windows.
 3. Replace live audio streaming with a silent rolling buffer (last 18 seconds in-memory) and on-demand playback.
 4. Add capture controls, reliability fixes, a responsive audio-level meter, and a dark teal/orange theme.
-5. Turn `Youtube-Search-n-Player.py` into a themed YouTube Search & Player web app.
+5. Turn `utils/Youtube-Search-n-Player.py` into a themed YouTube Search & Player web app.
 
 ---
 
-## Phase 1 — YouTube API 400 Debugging (`Youtube-Demo.py`)
+## Phase 1 — YouTube API 400 Debugging (`utils/Youtube-Demo.py`)
 
 ### Symptom
 - Requests to `https://www.googleapis.com/youtube/v3/search` returned `400 Bad Request`.
@@ -25,7 +25,7 @@ This log captures the full path we took in this workspace, from the very first Y
 
 ---
 
-## Phase 2 — Windows System Audio Capture Web App (`web_audio_capture.py`)
+## Phase 2 — Windows System Audio Capture Web App (`utils/web_audio_capture.py`)
 
 ### Starting goal
 Capture Windows system audio (speaker output) and play it in the browser.
@@ -69,14 +69,14 @@ Implemented:
 
 ---
 
-## Phase 3 — YouTube Search & Player Web App (`Youtube-Search-n-Player.py`)
+## Phase 3 — YouTube Search & Player Web App (`utils/Youtube-Search-n-Player.py`)
 
 ## Goal
-Turn `Youtube-Search-n-Player.py` into a web app and apply the same theme/colors used by `web_audio_capture.py`.
+Turn `utils/Youtube-Search-n-Player.py` into a web app and apply the same theme/colors used by `utils/web_audio_capture.py`.
 
 ## Starting Point
-- `Youtube-Search-n-Player.py` was a CLI script calling `youtube/v3/search` and printing JSON.
-- `web_audio_capture.py` already used Flask with an inline HTML template and a defined theme via CSS variables:
+- `utils/Youtube-Search-n-Player.py` was a CLI script calling `youtube/v3/search` and printing JSON.
+- `utils/web_audio_capture.py` already used Flask with an inline HTML template and a defined theme via CSS variables:
   - `--bg`, `--panel`, `--panel-2`, `--text`, `--muted`, `--border`, `--teal`, `--orange`
   - background radial gradients + card/button styling
 
@@ -90,7 +90,7 @@ Turn `Youtube-Search-n-Player.py` into a web app and apply the same theme/colors
   - Embedded playback via `https://www.youtube.com/embed/<videoId>`
 
 ### 2) Apply matching theme
-- Reused the theme variables and styling approach from `web_audio_capture.py` (inline `<style>`).
+- Reused the theme variables and styling approach from `utils/web_audio_capture.py` (inline `<style>`).
 - Kept the same overall look: dark background gradients, card container, consistent buttons and borders.
 
 ### 3) URL encoding + escaping hardening
@@ -151,7 +151,7 @@ Small UX follow-ups:
   - Shows results with thumbnails + descriptions
   - Embeds a selected video
   - Pre-filters results to reduce non-embeddable selections
-  - Uses the same theme/colors as `web_audio_capture.py`
+  - Uses the same theme/colors as `utils/web_audio_capture.py`
   - Uses a 1-column layout (player then results)
 
 ---
@@ -160,7 +160,7 @@ Small UX follow-ups:
 
 ### A) Audio Clip App
 1. Start:
-   - `D:/mse/nguyen_sy_hung_codebases/machine-learning-1/.venv/Scripts/python.exe web_audio_capture.py`
+   - `D:/mse/nguyen_sy_hung_codebases/machine-learning-1/.venv/Scripts/python.exe utils/web_audio_capture.py`
 2. Open:
    - `http://127.0.0.1:5000`
 3. Use:
@@ -173,7 +173,7 @@ Small UX follow-ups:
 2. Set API key in `.env`:
    - `GOOGLE_DEVELOPER_API_KEY=...`
 3. Start:
-   - `D:/mse/nguyen_sy_hung_codebases/machine-learning-1/.venv/Scripts/python.exe Youtube-Search-n-Player.py`
+   - `D:/mse/nguyen_sy_hung_codebases/machine-learning-1/.venv/Scripts/python.exe utils/Youtube-Search-n-Player.py`
 4. Open:
    - `http://127.0.0.1:5000`
 

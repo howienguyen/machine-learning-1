@@ -7,7 +7,7 @@ This document summarizes the current production-like training path, the main pre
 The current production-like training path is:
 
 ```text
-download_by_genre_limits.py --> extract_mtg_processed_samples.py
+utils/download_by_genre_limits.py --> extract_mtg_processed_samples.py
 
 data sources: FMA & additional_datasets -->
 
@@ -80,21 +80,24 @@ Notes:
 
 The current inference and demo/application entry points are:
 
-1. `MelCNN-MGR/inference_logmel_cnn_v1_1.py`
-2. `MelCNN-MGR/inference_web_service/app.py`
-3. `MelCNN-MGR/demo-app/web_audio_capture_v1.py`
+1. `MelCNN-MGR/model_inference/inference_logmel_cnn_v2_1.py`
+2. `MelCNN-MGR/Lab/inference_logmel_cnn_v1_1.py` as the legacy direct-inference script
+3. `MelCNN-MGR/inference_web_service/app.py`
+4. `MelCNN-MGR/demo-app/web_audio_capture_v1.py`
 
 Important boundary:
 
-1. the current inference module and web service are still built around the `v1.1` inference path
-2. `MelCNN-MGR/inference_logmel_cnn_v1_1.py` is currently hardcoded to 10-second crops and its own fixed log-mel shape
+1. the current web service now wraps the config-driven `v2.1` family inference module
+2. the old `v1.1` direct inference script has been relocated to `MelCNN-MGR/Lab/inference_logmel_cnn_v1_1.py`
 3. the current `v2.1` training pipeline follows the log-mel dataset configuration, which currently defaults to `sample_length_sec = 15` from `MelCNN-MGR/settings.json`
-4. because of that, do not assume a `v2.1` run directory is automatically compatible with the current inference/service modules unless the feature shape matches
+4. the current service path should be used with a compatible `v2` / `v2.1` / `v2.1-exp` run directory
+5. use the relocated legacy `v1.1` script only when you intentionally want the historical fixed-shape v1.1 inference path
 
 Practical meaning:
 
 1. use `v2.1` / `v2.1-exp` for current training experiments
-2. use the current inference service path with a compatible `v1.1`-style run directory unless you deliberately update the inference module for `v2.1`
+2. use the current inference service path with a compatible v2-family run directory
+3. use the relocated `v1.1` script in `MelCNN-MGR/Lab/` only for legacy compatibility checks
 
 ## Command Lines
 
@@ -103,7 +106,7 @@ Practical meaning:
 Download genre-limited MTG/Jamendo audio:
 
 ```bash
-python download_by_genre_limits.py
+python utils/download_by_genre_limits.py
 ```
 
 Extract processed MTG samples:
@@ -256,26 +259,26 @@ Notes:
 
 ### 6. Run direct inference
 
-Current direct inference path is the v1.1 inference module:
+Current direct inference path is the config-driven v2.1 family inference module:
 
 ```bash
-python MelCNN-MGR/inference_logmel_cnn_v1_1.py \
-	--run-dir MelCNN-MGR/models/logmel-cnn-v1_1-YYYYMMDD-HHMMSS \
+python MelCNN-MGR/model_inference/inference_logmel_cnn_v2_1.py \
+	--run-dir MelCNN-MGR/models/<logmel-v2-family-run-dir> \
 	audio_demo/Blues-Chris\ Stapleton-Tennessee\ Whiskey.mp3
 ```
 
-Use this with a run directory that is compatible with the current v1.1 inference feature shape.
+If you need the old fixed-shape v1.1 path, use `MelCNN-MGR/Lab/inference_logmel_cnn_v1_1.py` explicitly.
 
 ### 7. Run the inference web service
 
 ```bash
 python MelCNN-MGR/inference_web_service/app.py \
-	--run-dir MelCNN-MGR/models/logmel-cnn-v1_1-YYYYMMDD-HHMMSS \
+	--run-dir MelCNN-MGR/models/<logmel-v2-family-run-dir> \
 	--host 127.0.0.1 \
 	--port 8000
 ```
 
-This service currently wraps `inference_logmel_cnn_v1_1.py`, so the same compatibility note applies.
+This service currently wraps `model_inference/inference_logmel_cnn_v2_1.py`, so use a compatible v2-family run directory.
 
 ### 8. Run the streaming demo app
 
@@ -304,7 +307,7 @@ For the current production-like training flow, the practical order is:
 3. log-mel build via `2_build_log_mel_dataset.py`
 4. EDA in `2_MelCNN_MGR_Manifest_LogMel_EDA.ipynb`
 5. training in `logmel_cnn_v2_1.py` as the primary training script, or `logmel_cnn_v2_1_exp.py` for controlled experiments
-6. if you need the currently documented web demo/service path, use a compatible `v1.1`-style inference run with `inference_logmel_cnn_v1_1.py` / `inference_web_service/app.py`
+6. if you need the currently documented web demo/service path, use a compatible v2-family inference run with `model_inference/inference_logmel_cnn_v2_1.py` / `inference_web_service/app.py`
 7. streaming demo through `demo-app/web_audio_capture_v1.py`
 
 If you want to continue experimentation from an existing trained checkpoint while still producing a new run lineage, use `MelCNN-MGR/model_training/logmel_cnn_v2_1.py` or `MelCNN-MGR/model_training/logmel_cnn_v2_1_exp.py` with `--pretrained-model ...`.

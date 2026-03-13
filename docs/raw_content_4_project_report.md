@@ -5,7 +5,7 @@
 Mon Mar  9 10:14:44 UTC 2026
 
 ```bash
-(.venv311) hsnguyen@hsnwsl:/mnt/d/mse/nguyen_sy_hung_codebases/machine-learning-1$ python MelCNN-MGR/preprocessing/build_manifest.py \
+(.venv311) hsnguyen@hsnwsl:/mnt/d/mse/nguyen_sy_hung_codebases/machine-learning-1$ python MelCNN-MGR/Lab/build_manifest.py \
   --subset medium \
   --audio-root FMA/fma_medium \
   --metadata-root FMA/fma_metadata \
@@ -28,7 +28,7 @@ Mon Mar  9 10:14:44 UTC 2026
 10:21:51 INFO       MelCNN-MGR/data/processed/metadata_manifest_config_medium.json
 10:21:51 INFO       MelCNN-MGR/data/processed/metadata_manifest_report_medium.txt
 10:21:51 INFO     Done in 120.3s — 15749 usable samples out of 106574 candidates.
-(.venv311) hsnguyen@hsnwsl:/mnt/d/mse/nguyen_sy_hung_codebases/machine-learning-1$ python MelCNN-MGR/preprocessing/build_tiny_dataset.py \
+(.venv311) hsnguyen@hsnwsl:/mnt/d/mse/nguyen_sy_hung_codebases/machine-learning-1$ python MelCNN-MGR/Lab/build_tiny_dataset.py \
   --processed-dir MelCNN-MGR/data/processed \
   --source-subset medium \
   --output-subset tiny

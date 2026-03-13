@@ -1,6 +1,6 @@
-# Log-Mel CNN v1.1 Inference Web Service
+# Log-Mel CNN v2.1 Family Inference Web Service
 
-This service exposes `MelCNN-MGR/inference_logmel_cnn_v1_1.py` over both HTTP and WebSocket transports.
+This service exposes `MelCNN-MGR/model_inference/inference_logmel_cnn_v2_1.py` over both HTTP and WebSocket transports.
 
 ## Endpoints
 
@@ -15,12 +15,12 @@ This service exposes `MelCNN-MGR/inference_logmel_cnn_v1_1.py` over both HTTP an
 
 ```bash
 python MelCNN-MGR/inference_web_service/app.py \
-  --run-dir MelCNN-MGR/models/logmel-cnn-v1_1-20260311-025046 \
+  --run-dir MelCNN-MGR/models/<logmel-v2-family-run-dir> \
   --host 127.0.0.1 \
   --port 8000
 ```
 
-You can also set the run directory via `LOGMEL_CNN_V11_RUN_DIR`.
+If `--run-dir` is omitted, the service falls back to its built-in demo run directory.
 
 ## Predict by local path
 
@@ -60,6 +60,7 @@ curl -X POST http://127.0.0.1:8000/predict_batch \
 1. The model is loaded once at service startup and reused across HTTP and WebSocket requests.
 2. `POST /predict` accepts multipart uploads only.
 3. `POST /predict_json` and `POST /predict_batch` use trusted local file paths.
+4. The underlying inference module is config-driven, so it reads feature settings from the selected run directory instead of relying on a fixed v1.1 shape.
 
 ## WebSocket Streaming
 

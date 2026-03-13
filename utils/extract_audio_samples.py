@@ -2,11 +2,11 @@
 
 Verbose mode (default):
 
-    python extract_audio_samples.py
+    python utils/extract_audio_samples.py
 
 Quiet mode for less terminal stress:
 
-    python extract_audio_samples.py --quiet
+    python utils/extract_audio_samples.py --quiet
 
 Terminal note: (If you don't use --quiet)
 
