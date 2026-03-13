@@ -625,4 +625,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        import sys as _sys
+        if _sys.platform.startswith("linux"):
+            subprocess.run(["stty", "sane"], check=False)

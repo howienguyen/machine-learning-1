@@ -743,4 +743,9 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    finally:
+        import sys as _sys
+        if _sys.platform.startswith("linux"):
+            subprocess.run(["stty", "sane"], check=False)
