@@ -3,7 +3,7 @@
 Tue Mar  4 (UTC 2026)
 
 **Files changed:**
-- `MelCNN-MGR/notebooks/baseline_mfcc_cnn_v2.ipynb` (config cell, load_mfcc, extract_split, section 4 markdown, MFCC extraction cell)
+- `MelCNN-MGR/model_training/baseline_mfcc_cnn_v2.ipynb` (config cell, load_mfcc, extract_split, section 4 markdown, MFCC extraction cell)
 - `docs/MelCNN-MGR-Preprocessing.md` (new section: "Audio decode quality")
 
 ---

@@ -275,7 +275,7 @@ EarlyStopping-restored weights as `baseline_logmel_cnn_v20a1.keras` for referenc
 
 | File | Action |
 |------|--------|
-| `MelCNN-MGR/notebooks/baseline_logmel_cnn_v20a1.py` | Created (copied from v20a, all changes applied) |
+| `MelCNN-MGR/model_training/baseline_logmel_cnn_v20a1.py` | Created (copied from v20a, all changes applied) |
 
 ---
 

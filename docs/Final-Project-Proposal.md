@@ -549,5 +549,5 @@ Both baseline notebooks apply these two rules:
 | All metrics persisted in JSON run report | `evaluation.splits.{train,validation,test}` in run report | ✅ Done |
 
 Notebooks:
-* `MelCNN-MGR/notebooks/baseline_mfcc_cnn_v5.ipynb` — MFCC baseline (B0)
-* `MelCNN-MGR/notebooks/baseline_logmel_cnn_v1.ipynb` — Log-mel baseline (B1)
+* `MelCNN-MGR/model_training/baseline_mfcc_cnn_v5.ipynb` — MFCC baseline (B0)
+* `MelCNN-MGR/model_training/baseline_logmel_cnn_v1.ipynb` — Log-mel baseline (B1)

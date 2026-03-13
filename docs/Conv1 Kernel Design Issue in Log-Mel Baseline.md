@@ -6,8 +6,8 @@
 
 In this project, two baseline pipelines were implemented for music genre classification:
 
-1. **MFCC + CNN** (MelCNN-MGR/notebooks/baseline_mfcc_cnn_v5.ipynb)
-2. **Log-Mel Spectrogram + CNN** (MelCNN-MGR/notebooks/baseline_logmel_cnn_v1.ipynb)
+1. **MFCC + CNN** (MelCNN-MGR/model_training/baseline_mfcc_cnn_v5.ipynb)
+2. **Log-Mel Spectrogram + CNN** (MelCNN-MGR/model_training/baseline_logmel_cnn_v1.ipynb)
 
 Both pipelines operate on the same audio dataset and are intended to serve as **baseline models** for later improvements.
 
@@ -372,7 +372,7 @@ With these adjustments, the Log-Mel model is expected to outperform the MFCC bas
 # Development Plan: baseline_logmel_cnn_v10.ipynb
 
 **Date:** Friday, March 6, 2026 3:19:50 PM
-**Parent:** `MelCNN-MGR/notebooks/baseline_logmel_cnn_v1.ipynb`  
+**Parent:** `MelCNN-MGR/model_training/baseline_logmel_cnn_v1.ipynb`  
 **Reference:** `docs/Conv1 Kernel Design Issue in Log-Mel Baseline.md`
 
 ---
@@ -521,7 +521,7 @@ v10 has moderately more total parameters but **distributes them across layers** 
 
 | File | Action |
 |------|--------|
-| `MelCNN-MGR/notebooks/baseline_logmel_cnn_v10.ipynb` | **CREATE** — new notebook |
+| `MelCNN-MGR/model_training/baseline_logmel_cnn_v10.ipynb` | **CREATE** — new notebook |
 | `docs/@MelCNN-MGR-Todos.md` | **UPDATE** — add v10 task entry |
 
 No changes to preprocessing, manifest, or cache infrastructure.

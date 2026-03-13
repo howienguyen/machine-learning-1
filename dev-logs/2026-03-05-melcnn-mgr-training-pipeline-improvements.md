@@ -179,7 +179,7 @@ All per-run information is consolidated into a single `run_report_{SUBSET}.json`
 
 | File | Change |
 |---|---|
-| `MelCNN-MGR/notebooks/baseline_mfcc_cnn_v5.ipynb` | Config cell, Section 7 training cell, Section 9 eval cell, Section 9 markdown |
+| `MelCNN-MGR/model_training/baseline_mfcc_cnn_v5.ipynb` | Config cell, Section 7 training cell, Section 9 eval cell, Section 9 markdown |
 
 ## Run Directory Layout (post-changes)
 

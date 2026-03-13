@@ -78,7 +78,7 @@ Mon Mar  9 10:14:44 UTC 2026
 
 ### Baselines
 
-MelCNN-MGR/notebooks/baseline_logmel_cnn_v1.ipynb
-MelCNN-MGR/notebooks/baseline_mfcc_cnn_v5.ipynb
+MelCNN-MGR/model_training/baseline_logmel_cnn_v1.ipynb
+MelCNN-MGR/model_training/baseline_mfcc_cnn_v5.ipynb
 
 Note: Using either "tiny" or "small" dataset is good enough in this case

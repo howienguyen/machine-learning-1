@@ -1,6 +1,6 @@
 Mon Mar  9 09:50:04 UTC 2026
 
-Help me interpret the report below after running the training model script MelCNN-MGR/notebooks/baseline_logmel_cnn_v20a1.py. Tell me if it is good or not:
+Help me interpret the report below after running the training model script MelCNN-MGR/model_training/baseline_logmel_cnn_v20a1.py. Tell me if it is good or not:
 
 ```
 Loading best macro-F1 model for evaluation: /mnt/d/mse/nguyen_sy_hung_codebases/machine-learning-1/MelCNN-MGR/models/logmel-cnn-v20a1-20260309-015844/best_model_macro_f1.keras

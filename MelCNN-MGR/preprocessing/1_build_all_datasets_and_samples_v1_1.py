@@ -22,6 +22,11 @@ or the full pipeline in one run.
 The parquet outputs define a natural boundary between intermediate manifest
 generation and final training-manifest selection.
 
+Artifact and sample identifiers are stored as deterministic 128-bit hex hashes.
+The source-specific natural identity strings are still derived from stable
+metadata, but the parquet-visible `artifact_id` and `sample_id` values use
+their hashed forms instead of long raw path-based strings.
+
 During Stage 2, the additional-source sample manifest is deterministically
 shuffled with `--split-seed` before grouped final split assignment. Segment
 grouping still keeps all segments from the same source audio in the same split.
@@ -105,6 +110,7 @@ from __future__ import annotations
 
 import ast
 import argparse
+import hashlib
 import json
 import logging
 import math
@@ -142,7 +148,7 @@ _DATASET_MANIFEST_COLUMNS = [
     "sampling_exclusion_reason", "manifest_origin",
 ]
 _SAMPLE_MANIFEST_COLUMNS = [
-    "sample_id", "source", "genre_top", "filepath", "track_id", "sample_length_sec",
+    "sample_id", "artifact_id", "source", "genre_top", "filepath", "track_id", "sample_length_sec",
     "segment_index", "segment_start_sec", "segment_end_sec", "total_segments_from_audio",
     "duration_s", "actual_duration_s", "reason_code",
 ]
@@ -315,6 +321,44 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def _normalize_genre(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", value.casefold())
+
+
+def _hash_id_string(value: str) -> str:
+    text = str(value).strip()
+    if not text:
+        raise ValueError("Cannot hash an empty id string.")
+    return hashlib.blake2b(text.encode("utf-8"), digest_size=16).hexdigest()
+
+
+def _artifact_id_string(
+    source: object,
+    genre_top: object,
+    filepath: object,
+    track_id: object,
+) -> str:
+    source_value = "" if source is None else str(source).strip()
+    if _is_fma_source(source_value):
+        if pd.isna(track_id):
+            raise ValueError("FMA artifact id generation requires a track_id.")
+        return f"fma:{int(track_id)}"
+
+    filepath_obj = Path(str(filepath))
+    relative_path = _relative_to_workspace(filepath_obj)
+    source_audio_id = relative_path or str(filepath_obj)
+    return f"{source_value}:{genre_top}:{source_audio_id}"
+
+
+def _artifact_id(
+    source: object,
+    genre_top: object,
+    filepath: object,
+    track_id: object,
+) -> str:
+    return _hash_id_string(_artifact_id_string(source, genre_top, filepath, track_id))
+
+
+def _sample_id_string(artifact_id_string: str, segment_index: int) -> str:
+    return f"{artifact_id_string}:seg{segment_index:04d}"
 
 
 def load_data_sampling_settings(path: Path) -> dict[str, object]:
@@ -690,7 +734,10 @@ def build_fma_candidates_from_scratch(
     # Map to unified schema
     source_label = f"fma-{subset}"
     df["source"] = source_label
-    df["artifact_id"] = [f"fma:{int(tid)}" for tid in df.index]
+    df["artifact_id"] = [
+        _artifact_id(source_label, None, None, int(track_id))
+        for track_id in df.index.astype(int)
+    ]
     df["source_track_id"] = df.index.astype(str)
     df["track_id"] = df.index.astype("Int64")
     logging.info("[FMA-rescan] Probing actual audio durations ...")
@@ -1099,7 +1146,10 @@ def load_medium_candidates(
     logging.info("[FMA-medium] Computing derived columns ...")
     source_label = f"fma-{subset}"
     df["source"] = source_label
-    df["artifact_id"] = [f"fma:{int(track_id)}" for track_id in df.index.astype(int)]
+    df["artifact_id"] = [
+        _artifact_id(source_label, None, None, int(track_id))
+        for track_id in df.index.astype(int)
+    ]
     df["source_track_id"] = df.index.astype(str)
     df["track_id"] = df.index.astype("Int64")
     logging.info("[FMA-medium] Probing actual audio durations ...")
@@ -1212,7 +1262,12 @@ def collect_additional_candidates(
                     )
 
                 for genre in mapped_genres:
-                    artifact_id = f"{source_dir.name}:{genre}:{source_audio_id}"
+                    artifact_id = _artifact_id(
+                        source=source_dir.name,
+                        genre_top=genre,
+                        filepath=audio_path,
+                        track_id=None,
+                    )
                     rows.append(
                         {
                             "source": source_dir.name,
@@ -1357,7 +1412,8 @@ def build_samples_manifest(all_datasets: pd.DataFrame, sample_length_sec: float)
             end_sec = start_sec + sample_length_sec
             rows.append(
                 {
-                    "sample_id": f"{record.artifact_id}:seg{segment_index:04d}",
+                    "sample_id": _sample_id_string(str(record.artifact_id), segment_index),
+                    "artifact_id": record.artifact_id,
                     "source": record.source,
                     "genre_top": record.genre_top,
                     "filepath": record.filepath,

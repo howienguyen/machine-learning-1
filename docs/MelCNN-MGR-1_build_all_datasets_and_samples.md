@@ -86,8 +86,8 @@ The downstream log-mel builder can then consume `manifest_final_samples.parquet`
 The current default downstream consumers are:
 
 1. `MelCNN-MGR/preprocessing/2_build_log_mel_dataset.py`
-2. `MelCNN-MGR/notebooks/MelCNN_MGR_Manifest_LogMel_EDA.ipynb`
-3. `MelCNN-MGR/notebooks/logmel_cnn_v1.py`
+2. `MelCNN-MGR/model_training/MelCNN_MGR_Manifest_LogMel_EDA.ipynb`
+3. `MelCNN-MGR/model_training/logmel_cnn_v1.py`
 
 ## Script inputs
 
@@ -276,8 +276,10 @@ Each segment row receives a segment-level `sample_id` in this form:
 
 Examples:
 
-1. `fma:4537:seg0000`
-2. `dortmund-university:Rock:additional_datasets/data/dortmund-university/rock/foo.wav:seg0001`
+1. `57cd43b461bc19d485f908a39b25609e:seg0000`
+2. `57cd43b461bc19d485f908a39b25609e:seg0001`
+
+Here `artifact_id` is a deterministic 128-bit hex hash derived from the source-specific natural identity string for the audio artifact.
 
 These rows become `manifest_fma_all_samples.parquet` or `manifest_additional_all_samples.parquet`, depending on source.
 
@@ -432,7 +434,7 @@ One row per discovered audio candidate across FMA and additional datasets.
 | Column | Type | Meaning |
 | --- | --- | --- |
 | `source` | string | Source dataset name such as `fma-medium` or an additional dataset folder name |
-| `artifact_id` | string | Base source-audio identifier for the discovered artifact |
+| `artifact_id` | string | Deterministic 128-bit hex identifier for the discovered source-audio artifact |
 | `source_track_id` | string or null | Original source-side track id when available |
 | `track_id` | nullable Int64 | Numeric track id for FMA rows; null for additional datasets |
 | `genre_top` | string | Top-level target genre label |
@@ -453,7 +455,7 @@ One row per fixed-length segment generated from the eligible dataset rows.
 
 | Column | Type | Meaning |
 | --- | --- | --- |
-| `sample_id` | string | Segment-level id in the form `<artifact_id>:segNNNN` |
+| `sample_id` | string | Segment-level id in the form `<artifact_id>:segNNNN`, where `<artifact_id>` is the 128-bit hex base id |
 | `source` | string | Source dataset name |
 | `genre_top` | string | Target genre label |
 | `filepath` | string | Absolute audio file path |
@@ -497,7 +499,7 @@ The script intentionally uses two identity levels:
 1. `artifact_id` for source-audio artifacts in the Stage 1a dataset manifests
 2. `sample_id` for fixed-length segment rows in the Stage 1b sample manifests and `manifest_final_samples.parquet`
 
-This avoids collisions that would happen if only integer `track_id` were used, while keeping the segment manifests focused on segment-level identities.
+This avoids collisions that would happen if only integer `track_id` were used, while keeping parquet-visible ids compact and stable across reruns.
 
 ### Why `manifest_final_samples.parquet` is lean
 

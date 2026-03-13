@@ -11,6 +11,18 @@ files grouped by split directories:
 It also writes parquet indexes that training scripts can consume directly,
 instead of re-decoding audio and rebuilding log-mels inside each model script.
 
+Upstream manifests provide deterministic hashed sample identifiers. Segment-level
+sample ids keep the `:segNNNN` suffix so grouped audio identity remains
+recoverable by stripping the suffix when needed.
+
+Each manifest row is decoded using its segment start time and the target
+`sample_length_sec`. If the decoded waveform is shorter than the target length
+because the source audio ends early, the builder pads the waveform with zeros
+(silence) so every sample still reaches the exact target duration. If the
+decoded waveform is longer than expected, it is truncated to the target length.
+The final log-mel array is also written to a fixed `(n_mels, n_frames)` shape,
+with any missing tail frames zero-filled.
+
 Defaults mirror the active baseline reference in baseline_logmel_cnn_v21.py:
 - sample_rate = 22050
 - n_mels = 192

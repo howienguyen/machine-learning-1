@@ -32,9 +32,14 @@ both the full manifest and the split parquet files.
 
 ### Current output model
 
-- `sample_id` is a globally unique identifier in the form `source:track_id`
+- `sample_id` is a globally unique identifier column
 - `source` records the dataset name, currently `fma` for the base manifests
 - split parquet files inherit these columns directly
+
+Current note:
+
+- the newer multi-source manifest builders now use deterministic hashed ids for parquet-visible identity columns
+- segment-level ids keep the `:segNNNN` suffix so group-level source-audio identity is still recoverable by stripping that suffix
 
 ### Why this matters
 
@@ -70,7 +75,7 @@ This design is documented in:
 
 Two notebooks were updated to make subset semantics explicit and to support broader EDA.
 
-### `MelCNN-MGR/notebooks/Data-Understanding-Train-Val-Test-Genre-Distribution.ipynb`
+### `MelCNN-MGR/model_training/Data-Understanding-Train-Val-Test-Genre-Distribution.ipynb`
 
 Added or corrected:
 
@@ -80,7 +85,7 @@ Added or corrected:
 - broader whole-dataset genre and split EDA
 - refreshed result interpretation text to match the new controls
 
-### `MelCNN-MGR/notebooks/Data-Understanding-Small-vs-Medium-Genre-Expansion.ipynb`
+### `MelCNN-MGR/model_training/Data-Understanding-Small-vs-Medium-Genre-Expansion.ipynb`
 
 Added comparison views for:
 
@@ -339,7 +344,7 @@ with the explicit form still available for custom layouts.
 
 ### New notebook
 
-- `MelCNN-MGR/notebooks/Data-Understanding-Train-Val-Test-Genre-Distribution-Supplementation-Aware.ipynb`
+- `MelCNN-MGR/model_training/Data-Understanding-Train-Val-Test-Genre-Distribution-Supplementation-Aware.ipynb`
 
 ### Why it was added
 

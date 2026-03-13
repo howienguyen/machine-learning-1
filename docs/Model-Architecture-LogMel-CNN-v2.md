@@ -1,7 +1,7 @@
 
 Thu Mar 12 09:07:28 UTC 2026
 
-Based on MelCNN-MGR/notebooks/logmel_cnn_v2_1.py, would it be better (i.e the model would predict better) if add more neurals or another layer to the model architecture ?
+Based on MelCNN-MGR/model_training/logmel_cnn_v2_1.py, would it be better (i.e the model would predict better) if add more neurals or another layer to the model architecture ?
 
 **Short answer: No — adding more neurons or layers would likely hurt generalization, not help it.**
 

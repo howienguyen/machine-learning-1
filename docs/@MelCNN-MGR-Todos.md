@@ -53,7 +53,7 @@ Run:
 
 Note: MelCNN-MGR\baseline_mfcc_cnn_v1.py is the original standalone version (reads tracks.csv directly, no manifest). Kept for reference only.
 
-3. Log-mel + CNN: using the **same CNN architecture** and the **same training setup** (MelCNN-MGR/data/processed) as the MFCC CNN baseline solution (MelCNN-MGR/notebooks/baseline_mfcc_cnn_v5.ipynb) uses, changing only the input representation.
+3. Log-mel + CNN: using the **same CNN architecture** and the **same training setup** (MelCNN-MGR/data/processed) as the MFCC CNN baseline solution (MelCNN-MGR/model_training/baseline_mfcc_cnn_v5.ipynb) uses, changing only the input representation.
 3.1. Developing the Log-mel + CNN solution (i.e the training notebook for Log-mel + CNN, just like we have baseline_mfcc_cnn_v5.ipynb) --> DONE
 
 (D:\mse\nguyen_sy_hung_codebases\machine-learning-1\MelCNN-MGR\notebooks\baseline_logmel_cnn_v1.ipynb)

@@ -23,12 +23,19 @@ Segment count selection per eligible file:
     - duration <= min-duration-seconds: skipped
     - min-duration-seconds < duration <= 30s: extract 1 segment
     - 30s < duration <= 60s: extract 2 segments when max-num-segments > 1
-    - duration > 60s: extract up to max-num-segments segments
+    - duration > 60s: extract up to max-num-segments segments, capped by how
+      many full non-overlapping segments fit in the file duration
+
+Segment placement behavior:
+        - when possible, segment starts avoid the first and last edge-buffer-seconds
+        - if the file is too short to preserve both edge buffers, the extractor keeps
+            as much leading buffer as possible and sacrifices the trailing buffer first
 """
 
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import shutil
 import subprocess
@@ -93,11 +100,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-num-segments",
         type=int,
-        default=600,
+        default=240,  # 240
         help=(
             "Maximum number of segments to extract from a single file. "
             "Files longer than min-duration-seconds but <= 30s use 1 segment; "
-            "files > 30s and <= 60s use 2 segments when this value is greater than 1."
+            "files > 30s and <= 60s use 2 segments when this value is greater than 1; "
+            "files > 60s are capped by how many full non-overlapping segments fit in the audio."
         ),
     )
     parser.add_argument(
@@ -110,7 +118,10 @@ def parse_args() -> argparse.Namespace:
         "--edge-buffer-seconds",
         type=float,
         default=20.0,
-        help="Preferred buffer to avoid at the beginning and end when placing segment start times.",
+        help=(
+            "Preferred buffer to avoid at the beginning and end when placing segment start times. "
+            "If both buffers do not fit, the extractor preserves as much leading buffer as possible."
+        ),
     )
     parser.add_argument(
         "--overwrite",
@@ -193,15 +204,11 @@ def choose_start_times(
     if max_start <= 0:
         return [0.0]
 
+    start_min = min(edge_buffer_seconds, max_start)
+
     if duration_seconds >= segment_seconds + (2.0 * edge_buffer_seconds):
-        start_min = edge_buffer_seconds
         start_max = duration_seconds - edge_buffer_seconds - segment_seconds
     else:
-        start_min = 0.0
-        start_max = max_start
-
-    if start_max < start_min:
-        start_min = 0.0
         start_max = max_start
 
     if num_segments == 1:
@@ -210,9 +217,16 @@ def choose_start_times(
     return np.linspace(start_min, start_max, num=num_segments).tolist()
 
 
-def choose_num_segments(duration_seconds: float, max_num_segments: int) -> int:
-    if max_num_segments <= 1:
-        return max_num_segments
+def choose_num_segments(
+    duration_seconds: float,
+    segment_seconds: float,
+    max_num_segments: int,
+) -> int:
+    if max_num_segments <= 0:
+        return 0
+
+    if max_num_segments == 1:
+        return 1
 
     if duration_seconds <= 30.0:
         return 1
@@ -220,7 +234,12 @@ def choose_num_segments(duration_seconds: float, max_num_segments: int) -> int:
     if duration_seconds <= 60.0:
         return 2
 
-    return max_num_segments
+    max_segments_by_duration = max(
+        0,
+        math.floor((duration_seconds + 1e-9) / max(1e-9, segment_seconds)),
+    )
+
+    return min(max_num_segments, max_segments_by_duration)
 
 
 def resolve_backend(requested_backend: str | None) -> str:
@@ -379,8 +398,25 @@ def process_subfolder(
 
             num_segments = choose_num_segments(
                 duration_seconds=duration_seconds,
+                segment_seconds=segment_seconds,
                 max_num_segments=max_num_segments,
             )
+
+            if num_segments < 1:
+                skipped_short += 1
+                _log_progress(
+                    quiet,
+                    "[worker:{worker}] est={done:04d}/{total:04d} ({pct:5.1f}%) SKIP {source} duration={duration:.2f}s segment_seconds={segment_seconds:.2f}s".format(
+                        worker=subdir.name,
+                        done=written_segments,
+                        total=estimated_total_segments,
+                        pct=progress_pct,
+                        source=audio_path.relative_to(input_dir),
+                        duration=duration_seconds,
+                        segment_seconds=segment_seconds,
+                    ),
+                )
+                continue
 
             start_times = choose_start_times(
                 duration_seconds=duration_seconds,

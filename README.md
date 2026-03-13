@@ -246,8 +246,8 @@ outputs to a separate directory first and train from those explicit paths.
 
 For provenance-aware EDA of this workflow, use:
 
-- `MelCNN-MGR/notebooks/Data-Understanding-Train-Val-Test-Genre-Distribution.ipynb` for the generic split-shape sanity check
-- `MelCNN-MGR/notebooks/Data-Understanding-Train-Val-Test-Genre-Distribution-Supplementation-Aware.ipynb` for official-vs-current-vs-projected small-split comparisons
+- `MelCNN-MGR/model_training/Data-Understanding-Train-Val-Test-Genre-Distribution.ipynb` for the generic split-shape sanity check
+- `MelCNN-MGR/model_training/Data-Understanding-Train-Val-Test-Genre-Distribution-Supplementation-Aware.ipynb` for official-vs-current-vs-projected small-split comparisons
 
 ### 8. Python environment
 
@@ -263,7 +263,7 @@ All notebooks/scripts auto-detect and fall back through CUDA GPU → Intel XPU �
 
 ## Main Notebooks & Scripts
 
-### `MelCNN-MGR/notebooks/baseline_mfcc_cnn_v5.ipynb`
+### `MelCNN-MGR/model_training/baseline_mfcc_cnn_v5.ipynb`
 **Goal 1 — MFCC baseline (reference implementation)**
 
 A modernized reimplementation of the official FMA ConvNet-on-MFCC baseline
@@ -284,12 +284,12 @@ modern engineering layers are added around it (ffmpeg decoding, parquet manifest
 **Run:**
 ```bash
 # Open and run all cells in VS Code / Jupyter
-MelCNN-MGR/notebooks/baseline_mfcc_cnn_v5.ipynb
+MelCNN-MGR/model_training/baseline_mfcc_cnn_v5.ipynb
 ```
 
 ---
 
-### `MelCNN-MGR/notebooks/baseline_logmel_cnn_v10.ipynb`
+### `MelCNN-MGR/model_training/baseline_logmel_cnn_v10.ipynb`
 **Goal 1 — Log-Mel baseline (representation-fair counterpart to v5)**
 
 A representation-fair log-mel CNN baseline designed for a controlled comparison with
@@ -309,14 +309,14 @@ and adaptive callbacks. Uses **30-second clips** — the same duration as the MF
 
 **Run:**
 ```bash
-MelCNN-MGR/notebooks/baseline_logmel_cnn_v10.ipynb
+MelCNN-MGR/model_training/baseline_logmel_cnn_v10.ipynb
 ```
 
 Further reading: [`docs/Conv1 Kernel Design Issue in Log-Mel Baseline.md`](docs/Conv1%20Kernel%20Design%20Issue%20in%20Log-Mel%20Baseline.md)
 
 ---
 
-### `MelCNN-MGR/notebooks/baseline_logmel_cnn_v21.py`
+### `MelCNN-MGR/model_training/baseline_logmel_cnn_v21.py`
 **Goal 2 — 15-second Extended Version (Long-Context Version)**
 
 Similar to v20a1 but trained on **15-second clips** to capture more temporal context,
@@ -333,13 +333,13 @@ using random cropping during training to improve robustness.
 
 **Run:**
 ```bash
-cd MelCNN-MGR/notebooks
+cd MelCNN-MGR/model_training
 python baseline_logmel_cnn_v21.py
 ```
 
 ---
 
-### `MelCNN-MGR/notebooks/baseline_logmel_cnn_v20a1.py`
+### `MelCNN-MGR/model_training/baseline_logmel_cnn_v20a1.py`
 **Goal 2 — Quality-improved Log-Mel baseline (production-ready)**
 
 The most stable and optimized 10-second reference script in the project. Refines
@@ -360,13 +360,13 @@ random temporal cropping (10s window), and enhanced model loading stability.
 
 **Run:**
 ```bash
-cd MelCNN-MGR/notebooks
+cd MelCNN-MGR/model_training
 python baseline_logmel_cnn_v20a1.py
 ```
 
 ---
 
-### `MelCNN-MGR/notebooks/baseline_logmel_cnn_v20a.py`
+### `MelCNN-MGR/model_training/baseline_logmel_cnn_v20a.py`
 **Goal 2 — Log-Mel baseline (legacy v20a script)**
 
 Further reading: [`docs/Implementation Guide - baseline_logmel_cnn_v20a.md`](docs/Implementation%20Guide%20-%20baseline_logmel_cnn_v20a.md)
@@ -407,7 +407,7 @@ for full documentation.
 
 ```
 MelCNN-MGR/
-├── notebooks/
+├── model_training/
 │   ├── baseline_mfcc_cnn_v5.ipynb          ← MFCC baseline (Goal 1)
 │   ├── baseline_logmel_cnn_v10.ipynb       ← Log-Mel baseline (Goal 1, representation-fair)
 │   ├── baseline_logmel_cnn_v20a.py         ← Quality-improved Log-Mel (Goal 2)

@@ -4,7 +4,7 @@ Log-Mel CNN v1.1 Inference Module
 Reusable inference engine for Log-Mel CNN v1.1 genre classification.
 
 Loads a trained model, normalization stats, and genre labels from a run
-directory produced by ``MelCNN-MGR/notebooks/logmel_cnn_v1_1.py``.
+directory produced by ``MelCNN-MGR/model_training/logmel_cnn_v1_1.py``.
 Supports both single-crop (center 10 s) and 3-crop (early/middle/late)
 inference.
 

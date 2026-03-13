@@ -96,7 +96,7 @@ The full production-like pipeline consists of five logical stages connected by w
                              ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │  STAGE 3 (optional): EDA Notebook                                      │
-│  MelCNN-MGR/notebooks/MelCNN_MGR_Manifest_LogMel_EDA.ipynb             │
+│  MelCNN-MGR/model_training/MelCNN_MGR_Manifest_LogMel_EDA.ipynb             │
 │                                                                        │
 │  Reads all intermediate artifacts for visual data quality auditing.    │
 └────────────────────────────┬────────────────────────────────────────────┘
@@ -104,7 +104,7 @@ The full production-like pipeline consists of five logical stages connected by w
                              ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
 │  STAGE 4: Model Training                                               │
-│  MelCNN-MGR/notebooks/logmel_cnn_v1.py                                 │
+│  MelCNN-MGR/model_training/logmel_cnn_v1.py                                 │
 │                                                                        │
 │  Outputs:                                                              │
 │    → models/logmel-cnn-v1-{timestamp}/logmel_cnn_v1.keras              │
@@ -332,7 +332,9 @@ Each segment gets a unique `sample_id` following the pattern:
 <artifact_id>:seg<NNNN>
 ```
 
-For example: `fma:12345:seg0000`, `fma:12345:seg0001`, `fma:12345:seg0002` for a 45s FMA track yielding three 15s segments under the current settings snapshot.
+Here `artifact_id` is a deterministic 128-bit hex hash of the source-specific natural identity string.
+
+For example: `57cd43b461bc19d485f908a39b25609e:seg0000`, `57cd43b461bc19d485f908a39b25609e:seg0001`, `57cd43b461bc19d485f908a39b25609e:seg0002` for a 45s source track yielding three 15s segments under the current settings snapshot.
 
 #### Duration Normalization
 
@@ -487,7 +489,7 @@ Each `logmel_manifest_{split}.parquet` contains:
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `sample_id` | string | Unique sample identifier (e.g., `fma:12345:seg0001`) |
+| `sample_id` | string | Unique sample identifier (e.g., `57cd43b461bc19d485f908a39b25609e:seg0001`) |
 | `logmel_path` | string | Relative path to the `.npy` file |
 | `genre_top` | string | Genre label |
 | `source` | string | Data source identifier (e.g., `fma-medium`, `mtg-jamendo`) |
@@ -507,7 +509,7 @@ python MelCNN-MGR/preprocessing/2_build_log_mel_dataset.py --workers 8
 
 ## 8. Stage 3: Exploratory Data Analysis — `MelCNN_MGR_Manifest_LogMel_EDA.ipynb`
 
-**Notebook:** `MelCNN-MGR/notebooks/MelCNN_MGR_Manifest_LogMel_EDA.ipynb` (14 cells)
+**Notebook:** `MelCNN-MGR/model_training/MelCNN_MGR_Manifest_LogMel_EDA.ipynb` (14 cells)
 
 ### Purpose
 
@@ -581,7 +583,7 @@ Computes and displays 9 key findings as a markdown summary:
 
 ## 9. Stage 4: Model Training — `logmel_cnn_v1.py`
 
-**Script:** `MelCNN-MGR/notebooks/logmel_cnn_v1.py` (~1,170 lines)
+**Script:** `MelCNN-MGR/model_training/logmel_cnn_v1.py` (~1,170 lines)
 
 ### Purpose
 
@@ -742,7 +744,7 @@ The JSON run report includes:
 ### CLI Usage
 
 ```bash
-python MelCNN-MGR/notebooks/logmel_cnn_v1.py
+python MelCNN-MGR/model_training/logmel_cnn_v1.py
 ```
 
 The script auto-detects the best available device (GPU > XPU > CPU) and configures TensorFlow accordingly.
@@ -903,7 +905,7 @@ machine-learning-1/                              ← Workspace root
 │   │       ├── logmel_manifest_test.parquet
 │   │       └── <genre>/<hash>.npy
 │   │
-│   ├── notebooks/
+│   ├── model_training/
 │   │   ├── MelCNN_MGR_Manifest_LogMel_EDA.ipynb ← [Stage 3] EDA notebook
 │   │   └── logmel_cnn_v1.py                     ← [Stage 4] Training script
 │   │

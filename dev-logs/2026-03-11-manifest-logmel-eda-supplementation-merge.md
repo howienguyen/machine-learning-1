@@ -8,7 +8,7 @@ parallel notebook narrative.
 
 Updated artifact:
 
-1. `MelCNN-MGR/notebooks/2_MelCNN_MGR_Manifest_LogMel_EDA.ipynb`
+1. `MelCNN-MGR/model_training/2_MelCNN_MGR_Manifest_LogMel_EDA.ipynb`
 
 ## Summary
 

@@ -3,7 +3,7 @@
 ## Scope
 
 This log covers the review, documentation, implementation, and final cleanup of
-`MelCNN-MGR/notebooks/logmel_cnn_v1_1.py`, which was created as the next training
+`MelCNN-MGR/model_training/logmel_cnn_v1_1.py`, which was created as the next training
 candidate after analyzing the first full `logmel_cnn_v1.py` run.
 
 Covered changes:
@@ -53,7 +53,7 @@ That report became the design basis for v1.1.
 
 ### Purpose
 
-`MelCNN-MGR/notebooks/logmel_cnn_v1_1.py` was created as a direct successor to
+`MelCNN-MGR/model_training/logmel_cnn_v1_1.py` was created as a direct successor to
 `logmel_cnn_v1.py`, preserving the same dataset and overall architecture family while
 testing a more aggressive regularization and training-control recipe.
 

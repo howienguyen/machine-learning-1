@@ -1,4 +1,4 @@
-"""HTTP and WebSocket inference service for Log-Mel CNN v1.1.
+"""HTTP and WebSocket inference service for the Log-Mel CNN v2.1 family.
 
 python MelCNN-MGR/inference_web_service/app.py \
   --run-dir MelCNN-MGR/models/logmel-cnn-demo \
@@ -41,25 +41,23 @@ MELCNN_DIR = SERVICE_DIR.parent
 if str(MELCNN_DIR) not in sys.path:
     sys.path.insert(0, str(MELCNN_DIR))
 
-from inference_logmel_cnn_v1_1 import (
+from inference_logmel_cnn_v2_1 import (
     AUDIO_BACKEND,
-    CLIP_DURATION,
-    SAMPLE_RATE,
-    LogMelCNNV11Inference,
+    LogMelCNNV21Inference,
     PredictionResult,
 )
 
 
-DEFAULT_HOST = "127.0.0.1"
+DEFAULT_HOST = "127.0.0.1" 
 DEFAULT_PORT = 8000
-ENV_RUN_DIR = "LOGMEL_CNN_V11_RUN_DIR"
+DEFAULT_RUN_DIR = (MELCNN_DIR / "demo-models" / "logmel-cnn-v2-20260311-171117").resolve()
 STREAM_PATH = "/ws/stream"
 
 
 class StreamSession:
     def __init__(
         self,
-        engine: LogMelCNNV11Inference,
+        engine: LogMelCNNV21Inference,
         sample_rate: int,
         channels: int,
         sample_format: str,
@@ -75,8 +73,10 @@ class StreamSession:
         self.mode = mode
         self.emit_interval_sec = float(emit_interval_sec)
         self.stream_id = stream_id or "stream"
-        self.max_buffer_samples = int(round(max_buffer_sec * SAMPLE_RATE))
-        self.emit_interval_samples = max(1, int(round(self.emit_interval_sec * SAMPLE_RATE)))
+        self.target_sample_rate = int(engine.sample_rate)
+        self.target_clip_duration = float(engine.clip_duration)
+        self.max_buffer_samples = int(round(max_buffer_sec * self.target_sample_rate))
+        self.emit_interval_samples = max(1, int(round(self.emit_interval_sec * self.target_sample_rate)))
 
         self.buffer = np.zeros((0,), dtype=np.float32)
         self.total_resampled_samples = 0
@@ -101,8 +101,8 @@ class StreamSession:
     def _append_audio(self, audio: np.ndarray) -> None:
         if audio.size == 0:
             return
-        if self.sample_rate != SAMPLE_RATE:
-            audio = librosa.resample(audio, orig_sr=self.sample_rate, target_sr=SAMPLE_RATE).astype(np.float32, copy=False)
+        if self.sample_rate != self.target_sample_rate:
+            audio = librosa.resample(audio, orig_sr=self.sample_rate, target_sr=self.target_sample_rate).astype(np.float32, copy=False)
 
         self.buffer = np.concatenate([self.buffer, audio])
         if self.buffer.size > self.max_buffer_samples:
@@ -117,7 +117,7 @@ class StreamSession:
                 "event": event,
                 "stream_id": self.stream_id,
                 "received_chunks": self.received_chunks,
-                "buffer_seconds": round(self.buffer.size / SAMPLE_RATE, 3),
+                "buffer_seconds": round(self.buffer.size / self.target_sample_rate, 3),
                 "is_warmup": is_warmup,
             }
         )
@@ -131,8 +131,8 @@ class StreamSession:
             "event": "chunk_received",
             "stream_id": self.stream_id,
             "received_chunks": self.received_chunks,
-            "buffer_seconds": round(self.buffer.size / SAMPLE_RATE, 3),
-            "ready": self.buffer.size >= int(round(CLIP_DURATION * SAMPLE_RATE)),
+            "buffer_seconds": round(self.buffer.size / self.target_sample_rate, 3),
+            "ready": self.buffer.size >= int(round(self.target_clip_duration * self.target_sample_rate)),
         }
 
         should_emit = (
@@ -143,12 +143,12 @@ class StreamSession:
 
         result = self.engine.predict_waveform(
             self.buffer,
-            sr=SAMPLE_RATE,
+            sr=self.target_sample_rate,
             mode=self.mode,
             source_name=f"{self.stream_id}:live",
         )
         self.last_emit_total_samples = self.total_resampled_samples
-        is_warmup = self.buffer.size < int(round(CLIP_DURATION * SAMPLE_RATE))
+        is_warmup = self.buffer.size < int(round(self.target_clip_duration * self.target_sample_rate))
         return status, self._result_payload(result, event="partial_result", is_warmup=is_warmup)
 
     def finalize(self) -> dict[str, Any]:
@@ -156,11 +156,11 @@ class StreamSession:
             raise ValueError("No audio received for this stream.")
         result = self.engine.predict_waveform(
             self.buffer,
-            sr=SAMPLE_RATE,
+            sr=self.target_sample_rate,
             mode=self.mode,
             source_name=f"{self.stream_id}:final",
         )
-        is_warmup = self.buffer.size < int(round(CLIP_DURATION * SAMPLE_RATE))
+        is_warmup = self.buffer.size < int(round(self.target_clip_duration * self.target_sample_rate))
         return self._result_payload(result, event="final_result", is_warmup=is_warmup)
 
 
@@ -195,11 +195,9 @@ def _resolve_mode(raw_mode: str | None) -> str:
 
 
 def _resolve_run_dir(run_dir: str | Path | None) -> Path:
-    candidate = run_dir or os.environ.get(ENV_RUN_DIR)
+    candidate = run_dir or DEFAULT_RUN_DIR
     if not candidate:
-        raise ValueError(
-            f"Run directory is required. Pass --run-dir or set {ENV_RUN_DIR}."
-        )
+        raise ValueError("Run directory is required.")
     return Path(candidate).expanduser().resolve()
 
 
@@ -208,23 +206,26 @@ def create_app(
     prefer_macro_f1: bool = True,
 ) -> FastAPI:
     resolved_run_dir = _resolve_run_dir(run_dir)
-    engine = LogMelCNNV11Inference(
+    engine = LogMelCNNV21Inference(
         resolved_run_dir,
         prefer_macro_f1=prefer_macro_f1,
     )
 
-    app = FastAPI(title="Log-Mel CNN v1.1 Inference Service")
+    app = FastAPI(title="Log-Mel CNN v2.1 Family Inference Service")
     app.state.engine = engine
 
     @app.get("/health")
     async def health() -> Any:
         return {
             "status": "ok",
-            "service": "logmel-cnn-v1_1-inference",
+            "service": "logmel-cnn-v2_1-family-inference",
             "transport": ["http", "websocket"],
             "audio_backend": AUDIO_BACKEND,
             "run_dir": str(engine.run_dir),
             "model_file": engine.model_path.name,
+            "sample_rate": engine.sample_rate,
+            "clip_duration": engine.clip_duration,
+            "logmel_shape": list(engine.logmel_shape),
             "n_classes": engine.n_classes,
         }
 
@@ -234,6 +235,9 @@ def create_app(
             "run_dir": str(engine.run_dir),
             "model_file": engine.model_path.name,
             "audio_backend": AUDIO_BACKEND,
+            "sample_rate": engine.sample_rate,
+            "clip_duration": engine.clip_duration,
+            "logmel_shape": list(engine.logmel_shape),
             "genre_classes": engine.genre_classes,
             "n_classes": engine.n_classes,
             "run_report": engine.run_report,
@@ -335,9 +339,9 @@ def create_app(
         await websocket.send_json(
             {
                 "event": "hello",
-                "service": "logmel-cnn-v1_1-inference",
-                "sample_rate": SAMPLE_RATE,
-                "clip_duration": CLIP_DURATION,
+                "service": "logmel-cnn-v2_1-family-inference",
+                "sample_rate": engine.sample_rate,
+                "clip_duration": engine.clip_duration,
                 "supported_sample_formats": ["pcm_s16le", "pcm_f32le"],
                 "supported_modes": ["single_crop", "three_crop"],
             }
@@ -358,7 +362,7 @@ def create_app(
                             mode = _resolve_mode(payload.get("mode"))
                             session = StreamSession(
                                 engine=engine,
-                                sample_rate=int(payload.get("sample_rate", SAMPLE_RATE)),
+                                sample_rate=int(payload.get("sample_rate", engine.sample_rate)),
                                 channels=int(payload.get("channels", 1)),
                                 sample_format=str(payload.get("sample_format") or payload.get("encoding") or "pcm_s16le"),
                                 mode=mode,
@@ -431,13 +435,13 @@ def create_app(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Run the Log-Mel CNN v1.1 HTTP/WebSocket inference service.",
+        description="Run the Log-Mel CNN v2.1-family HTTP/WebSocket inference service.",
     )
     parser.add_argument(
         "--run-dir",
         type=Path,
-        default=Path("MelCNN-MGR/models/logmel-cnn-demo"),
-        help=f"Training run directory. Can also be provided via {ENV_RUN_DIR}.",
+        default=DEFAULT_RUN_DIR,
+        help="Training run directory.",
     )
     parser.add_argument(
         "--host",

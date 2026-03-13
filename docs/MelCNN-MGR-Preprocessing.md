@@ -29,8 +29,8 @@ This prepares MTG/Jamendo-derived audio under `additional_datasets/data` so it c
 data sources: FMA + additional_datasets
     -> MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples.py
     -> MelCNN-MGR/preprocessing/2_build_log_mel_dataset.py
-    -> MelCNN-MGR/notebooks/MelCNN_MGR_Manifest_LogMel_EDA.ipynb
-    -> MelCNN-MGR/notebooks/logmel_cnn_v1.py
+    -> MelCNN-MGR/model_training/MelCNN_MGR_Manifest_LogMel_EDA.ipynb
+    -> MelCNN-MGR/model_training/logmel_cnn_v1.py
 ```
 
 This means the current default workflow is:

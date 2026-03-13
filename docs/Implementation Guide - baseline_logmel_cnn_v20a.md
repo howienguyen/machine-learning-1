@@ -5,8 +5,8 @@ Fri Mar  6 15:02:34 UTC 2026
 ## 1. Overview
 
 This document is the **implementation plan** for upgrading
-`MelCNN-MGR/notebooks/baseline_logmel_cnn_v20.ipynb` into
-`MelCNN-MGR/notebooks/baseline_logmel_cnn_v20a.ipynb`.
+`MelCNN-MGR/model_training/baseline_logmel_cnn_v20.ipynb` into
+`MelCNN-MGR/model_training/baseline_logmel_cnn_v20a.ipynb`.
 
 The rationale for each change is described in
 `docs/Proposed Quality Improvement Plan for baseline_logmel_cnn_v20.ipynb.md`.

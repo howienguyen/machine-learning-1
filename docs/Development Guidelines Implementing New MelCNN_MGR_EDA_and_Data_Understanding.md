@@ -9,7 +9,7 @@ This document explains how to design and implement the manifest-centric EDA note
 
 The current primary notebook is:
 
-`MelCNN-MGR/notebooks/MelCNN_MGR_Manifest_LogMel_EDA.ipynb`
+`MelCNN-MGR/model_training/MelCNN_MGR_Manifest_LogMel_EDA.ipynb`
 
 The older `MelCNN_MGR_EDA_and_Data_Understanding.ipynb` can still serve as reference material, but it is no longer the best name or framing for the current production-like path.
 

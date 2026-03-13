@@ -8,7 +8,7 @@ Updated artifacts:
 
 1. `MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py`
 2. `MelCNN-MGR/preprocessing/2_build_log_mel_dataset.py`
-3. `MelCNN-MGR/notebooks/logmel_cnn_v2.py`
+3. `MelCNN-MGR/model_training/logmel_cnn_v2.py`
 4. `docs/MelCNN-MGR-1_build_all_datasets_and_samples.md`
 5. `docs/MelCNN-MGR-Production-Like-Pipeline.md`
 6. `dev-logs/2026-03-12-preprocessing-defaults-and-stage2-shuffle.md`

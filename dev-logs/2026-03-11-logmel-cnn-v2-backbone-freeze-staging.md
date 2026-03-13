@@ -2,11 +2,11 @@
 
 ## Scope
 
-This change refines the warm-start path in `MelCNN-MGR/notebooks/logmel_cnn_v2.py`.
+This change refines the warm-start path in `MelCNN-MGR/model_training/logmel_cnn_v2.py`.
 
 Updated artifacts:
 
-1. `MelCNN-MGR/notebooks/logmel_cnn_v2.py`
+1. `MelCNN-MGR/model_training/logmel_cnn_v2.py`
 2. `dev-logs/2026-03-11-logmel-cnn-v2-backbone-freeze-staging.md`
 
 ## Summary

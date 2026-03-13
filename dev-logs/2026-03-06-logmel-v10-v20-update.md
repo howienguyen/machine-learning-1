@@ -10,8 +10,8 @@ Why
 
 Key artifact locations
 - Notebooks:
-  - MelCNN-MGR/notebooks/baseline_logmel_cnn_v10.ipynb
-  - MelCNN-MGR/notebooks/baseline_logmel_cnn_v20.ipynb
+  - MelCNN-MGR/model_training/baseline_logmel_cnn_v10.ipynb
+  - MelCNN-MGR/model_training/baseline_logmel_cnn_v20.ipynb
 - Cache roots (per-notebook):
   - v10 per-track `.npy`: `CACHE_DIR / "logmel" / ("shared" if LOGMEL_CACHE_SHARED else SUBSET)`
     - index parquet: `CACHE_DIR / f"logmel_index_{split_name}_{SUBSET}.parquet"`
