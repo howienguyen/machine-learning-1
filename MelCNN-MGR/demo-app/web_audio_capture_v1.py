@@ -1,6 +1,6 @@
 # Run guide:
 # 1. Start the inference service first, for example:
-#    python MelCNN-MGR/inference_web_service/app.py --run-dir MelCNN-MGR/models/logmel-cnn-v1_1-YYYYMMDD-HHMMSS
+#    python MelCNN-MGR/inference_web_service/app.py --model-dir MelCNN-MGR/models/logmel-cnn-v2_1-YYYYMMDD-HHMMSS
 # 2. Then start this Flask capture app, optionally overriding the WebSocket target or batching interval:
 #    MELCNN_INFERENCE_WS_URL=ws://127.0.0.1:8000/ws/stream MELCNN_INFERENCE_SEND_INTERVAL_SEC=3 python MelCNN-MGR/demo-app/web_audio_capture_v1.py
 # 3. Open http://127.0.0.1:5000 in a browser and use Capture/Stop to stream system audio to the inference service.

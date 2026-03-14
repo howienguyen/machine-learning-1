@@ -295,3 +295,8 @@ python MelCNN-MGR/examples/inference_logmel_v10_example.py \
 
 —
 Generated during March 8, 2026 session.
+
+Update note, March 14, 2026:
+
+1. the current config-driven v2-family inference entry point is now `MelCNN-MGR/model_inference/inference_logmel_cnn_v2_x.py`
+2. current service and direct-inference examples should prefer `--model-dir` instead of `--run-dir`

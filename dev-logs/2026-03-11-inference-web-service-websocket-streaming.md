@@ -2,7 +2,7 @@
 
 ## Scope
 
-This change extends the Log-Mel CNN v1.1 inference web service so it can support
+This change extends the Log-Mel CNN inference web service so it can support
 both ordinary HTTP inference and near-real-time chunked audio streaming over WebSockets.
 
 Updated artifacts:
@@ -15,7 +15,7 @@ Updated artifacts:
 ## Summary
 
 The service was originally built as a small Flask REST wrapper around
-`inference_logmel_cnn_v1_1.py`.
+the older direct inference module.
 
 That was sufficient for one-shot request/response inference, but it was not an
 appropriate base for persistent bidirectional audio streaming. The service has now
@@ -74,7 +74,7 @@ The service now includes a `StreamSession` helper that manages:
 
 ### 5. Added waveform-level inference to the core inference module
 
-`MelCNN-MGR/inference_logmel_cnn_v1_1.py` now exposes:
+The core inference module now exposes:
 
 1. `predict_waveform(...)`
 

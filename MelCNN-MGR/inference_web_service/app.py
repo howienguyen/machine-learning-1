@@ -1,7 +1,7 @@
-"""HTTP and WebSocket inference service for the Log-Mel CNN v2.1 family.
+"""HTTP and WebSocket inference service for the Log-Mel CNN v2.x family.
 
 python MelCNN-MGR/inference_web_service/app.py \
-  --run-dir MelCNN-MGR/models/logmel-cnn-demo \
+    --model-dir MelCNN-MGR/models/logmel-cnn-demo \
   --host 127.0.0.1 \
   --port 8000
 
@@ -41,23 +41,23 @@ MELCNN_DIR = SERVICE_DIR.parent
 if str(MELCNN_DIR) not in sys.path:
     sys.path.insert(0, str(MELCNN_DIR))
 
-from model_inference.inference_logmel_cnn_v2_1 import (
+from model_inference.inference_logmel_cnn_v2_x import (
     AUDIO_BACKEND,
-    LogMelCNNV21Inference,
+    LogMelCNNV2XInference,
     PredictionResult,
 )
 
 
 DEFAULT_HOST = "127.0.0.1" 
 DEFAULT_PORT = 8000
-DEFAULT_RUN_DIR = (MELCNN_DIR / "demo-models" / "logmel-cnn-v2-20260311-171117").resolve()
+DEFAULT_MODEL_DIR = (MELCNN_DIR / "demo-models" / "logmel-cnn-v2-20260311-171117").resolve()
 STREAM_PATH = "/ws/stream"
 
 
 class StreamSession:
     def __init__(
         self,
-        engine: LogMelCNNV21Inference,
+        engine: LogMelCNNV2XInference,
         sample_rate: int,
         channels: int,
         sample_format: str,
@@ -194,34 +194,34 @@ def _resolve_mode(raw_mode: str | None) -> str:
     return mode
 
 
-def _resolve_run_dir(run_dir: str | Path | None) -> Path:
-    candidate = run_dir or DEFAULT_RUN_DIR
+def _resolve_model_dir(model_dir: str | Path | None) -> Path:
+    candidate = model_dir or DEFAULT_MODEL_DIR
     if not candidate:
-        raise ValueError("Run directory is required.")
+        raise ValueError("Model directory is required.")
     return Path(candidate).expanduser().resolve()
 
 
 def create_app(
-    run_dir: str | Path | None = None,
+    model_dir: str | Path | None = None,
     prefer_macro_f1: bool = True,
 ) -> FastAPI:
-    resolved_run_dir = _resolve_run_dir(run_dir)
-    engine = LogMelCNNV21Inference(
-        resolved_run_dir,
+    resolved_model_dir = _resolve_model_dir(model_dir)
+    engine = LogMelCNNV2XInference(
+        resolved_model_dir,
         prefer_macro_f1=prefer_macro_f1,
     )
 
-    app = FastAPI(title="Log-Mel CNN v2.1 Family Inference Service")
+    app = FastAPI(title="Log-Mel CNN v2.x Family Inference Service")
     app.state.engine = engine
 
     @app.get("/health")
     async def health() -> Any:
         return {
             "status": "ok",
-            "service": "logmel-cnn-v2_1-family-inference",
+            "service": "logmel-cnn-v2_x-family-inference",
             "transport": ["http", "websocket"],
             "audio_backend": AUDIO_BACKEND,
-            "run_dir": str(engine.run_dir),
+            "model_dir": str(engine.model_dir),
             "model_file": engine.model_path.name,
             "sample_rate": engine.sample_rate,
             "clip_duration": engine.clip_duration,
@@ -232,7 +232,7 @@ def create_app(
     @app.get("/model")
     async def model_info() -> Any:
         return {
-            "run_dir": str(engine.run_dir),
+            "model_dir": str(engine.model_dir),
             "model_file": engine.model_path.name,
             "audio_backend": AUDIO_BACKEND,
             "sample_rate": engine.sample_rate,
@@ -339,7 +339,7 @@ def create_app(
         await websocket.send_json(
             {
                 "event": "hello",
-                "service": "logmel-cnn-v2_1-family-inference",
+                "service": "logmel-cnn-v2_x-family-inference",
                 "sample_rate": engine.sample_rate,
                 "clip_duration": engine.clip_duration,
                 "supported_sample_formats": ["pcm_s16le", "pcm_f32le"],
@@ -435,13 +435,15 @@ def create_app(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Run the Log-Mel CNN v2.1-family HTTP/WebSocket inference service.",
+        description="Run the Log-Mel CNN v2.x-family HTTP/WebSocket inference service.",
     )
     parser.add_argument(
+        "--model-dir",
         "--run-dir",
+        dest="model_dir",
         type=Path,
-        default=DEFAULT_RUN_DIR,
-        help="Training run directory.",
+        default=DEFAULT_MODEL_DIR,
+        help="Model directory. The --run-dir alias is deprecated.",
     )
     parser.add_argument(
         "--host",
@@ -463,7 +465,7 @@ def main() -> None:
     args = parser.parse_args()
 
     app = create_app(
-        run_dir=args.run_dir,
+        model_dir=args.model_dir,
         prefer_macro_f1=not args.final_model,
     )
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")

@@ -1,9 +1,10 @@
-"""Config-driven inference module for the Log-Mel CNN v2 family.
+"""Config-driven inference module for the Log-Mel CNN v2.x family.
 
 Supports run directories produced by:
   - MelCNN-MGR/model_training/logmel_cnn_v2.py
   - MelCNN-MGR/model_training/logmel_cnn_v2_1.py
   - MelCNN-MGR/model_training/logmel_cnn_v2_1_exp.py
+    - MelCNN-MGR/model_training/logmel_cnn_v2_2.py
 
 Unlike the older v1.1 inference module, this loader reads feature settings from
 the run artifacts so it can match the training-time log-mel shape.
@@ -181,47 +182,48 @@ def _extract_three_crops(y: np.ndarray, sr: int, target_sec: float) -> list[np.n
     ]
 
 
-class LogMelCNNV21Inference:
-    """Load a trained v2-family model and run genre inference on audio files."""
+class LogMelCNNV2XInference:
+    """Load a trained v2.x-family model and run genre inference on audio files."""
 
     _MODEL_CANDIDATES = [
         "best_model_macro_f1.keras",
+        "logmel_cnn_v2_2.keras",
         "logmel_cnn_v2_1.keras",
         "logmel_cnn_v2_1_exp.keras",
         "logmel_cnn_v2.keras",
     ]
 
-    def __init__(self, run_dir: str | Path, prefer_macro_f1: bool = True) -> None:
+    def __init__(self, model_dir: str | Path, prefer_macro_f1: bool = True) -> None:
         import tensorflow as tf
 
         _register_cosine_schedule()
 
         self._tf = tf
-        self.run_dir = Path(run_dir).expanduser().resolve()
-        if not self.run_dir.is_dir():
-            raise FileNotFoundError(f"Run directory not found: {self.run_dir}")
+        self.model_dir = Path(model_dir).expanduser().resolve()
+        if not self.model_dir.is_dir():
+            raise FileNotFoundError(f"Model directory not found: {self.model_dir}")
 
         model_candidates = self._MODEL_CANDIDATES if prefer_macro_f1 else list(reversed(self._MODEL_CANDIDATES))
-        keras_files = sorted(self.run_dir.glob("*.keras"))
+        keras_files = sorted(self.model_dir.glob("*.keras"))
         fallbacks = [p.name for p in keras_files if p.name not in model_candidates]
 
         self.model_path: Path | None = None
         for name in model_candidates + fallbacks:
-            path = self.run_dir / name
+            path = self.model_dir / name
             if path.exists():
                 self.model_path = path
                 break
 
         if self.model_path is None:
             raise FileNotFoundError(
-                f"No .keras model found in run directory: {self.run_dir}\n"
+                f"No .keras model found in model directory: {self.model_dir}\n"
                 "Re-run the training script to generate model checkpoints."
             )
 
-        print(f"[LogMelCNNV21Inference] Loading model: {self.model_path.name}")
+        print(f"[LogMelCNNV2XInference] Loading model: {self.model_path.name}")
         self.model = tf.keras.models.load_model(str(self.model_path))
 
-        stats_path = self.run_dir / "norm_stats.npz"
+        stats_path = self.model_dir / "norm_stats.npz"
         if not stats_path.exists():
             raise FileNotFoundError(
                 f"Normalization stats not found: {stats_path}\n"
@@ -245,7 +247,7 @@ class LogMelCNNV21Inference:
         self._validate_feature_shape()
 
     def _load_run_report(self) -> tuple[Path | None, dict[str, object] | None]:
-        report_candidates = sorted(self.run_dir.glob("run_report_*.json"))
+        report_candidates = sorted(self.model_dir.glob("run_report_*.json"))
         if not report_candidates:
             return None, None
 
@@ -412,6 +414,9 @@ class LogMelCNNV21Inference:
         return results
 
 
+LogMelCNNV21Inference = LogMelCNNV2XInference
+
+
 def _print_result(result: PredictionResult) -> None:
     print(f"\n{'-' * 60}")
     print(f"File      : {Path(result.file).name}")
@@ -425,16 +430,18 @@ def _print_result(result: PredictionResult) -> None:
         print(f"{genre} ({prob:.1%})  ", end="")
     print()
 
-
+# For testing and direct CLI usage; 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Run direct inference with a trained Log-Mel CNN v2 family model.",
+        description="Run direct inference with a trained Log-Mel CNN v2.x family model.",
     )
     parser.add_argument(
+        "--model-dir",
         "--run-dir",
+        dest="model_dir",
         required=True,
         type=Path,
-        help="Training run directory containing .keras files and norm_stats.npz.",
+        help="Model directory containing .keras files and norm_stats.npz. The --run-dir alias is deprecated.",
     )
     parser.add_argument(
         "files",
@@ -455,8 +462,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    engine = LogMelCNNV21Inference(args.run_dir, prefer_macro_f1=not args.final_model)
-    print(f"Run dir       : {engine.run_dir}")
+    engine = LogMelCNNV2XInference(args.model_dir, prefer_macro_f1=not args.final_model)
+    print(f"Model dir     : {engine.model_dir}")
     print(f"Model file    : {engine.model_path.name}")
     print(f"Backend       : {AUDIO_BACKEND}")
     print(f"Classes       : {engine.n_classes}")
@@ -478,4 +485,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+
+    # Example usage:
+    #   python inference_logmel_cnn_v2_x.py --model-dir /path/to/model_dir /path/to/audio1.wav /path/to/audio2.wav
+
     main()

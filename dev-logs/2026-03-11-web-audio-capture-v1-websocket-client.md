@@ -150,7 +150,7 @@ The script was updated to dynamically resolve the `WORKSPACE_ROOT` so it can sti
 
 We also performed a cleanup and alignment pass:
 
-1. **`MelCNN-MGR/inference_logmel_cnn_v1_1.py`**: Added detailed docstrings and comments identifying which scripts depend on it (the web service and the demo app).
+1. **`MelCNN-MGR/model_inference/inference_logmel_cnn_v2_x.py`**: Acts as the current config-driven inference entry point used by the web service.
 2. **Settings Header**: Updated the settings block in the demo app with clear descriptions for `RECONNECT_MAX_ATTEMPTS`, `RECONNECT_BACKOFF_FACTOR`, `REPLAY_BUFFER_SEC`, and `SEND_INTERVAL_SEC`.
 3. **Execution Guides**: Added a "How to run" comment block at the top of the demo app to guide users on environment variables and dependencies.
 4. **`MelCNN-MGR/README-DEMO.md`**: Created/Updated this central manifest to document the full production-like pipeline and all command-line entry points.

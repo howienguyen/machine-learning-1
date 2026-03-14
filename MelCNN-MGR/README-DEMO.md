@@ -85,7 +85,7 @@ Notes:
 
 The current inference and demo/application entry points are:
 
-1. `MelCNN-MGR/model_inference/inference_logmel_cnn_v2_1.py`
+1. `MelCNN-MGR/model_inference/inference_logmel_cnn_v2_x.py`
 2. `MelCNN-MGR/Lab/inference_logmel_cnn_v1_1.py` as the legacy direct-inference script
 3. `MelCNN-MGR/inference_web_service/app.py`
 4. `MelCNN-MGR/demo-app/web_audio_capture_v1.py`
@@ -95,13 +95,13 @@ Important boundary:
 1. the current web service now wraps the config-driven `v2.1` family inference module
 2. the old `v1.1` direct inference script has been relocated to `MelCNN-MGR/Lab/inference_logmel_cnn_v1_1.py`
 3. the current `v2.1` training pipeline follows the log-mel dataset configuration, which currently defaults to `sample_length_sec = 15` from `MelCNN-MGR/settings.json`
-4. the current service path should be used with a compatible `v2` / `v2.1` / `v2.1-exp` run directory
+4. the current service path should be used with a compatible `v2` / `v2.1` / `v2.1-exp` model directory
 5. use the relocated legacy `v1.1` script only when you intentionally want the historical fixed-shape v1.1 inference path
 
 Practical meaning:
 
 1. use `v2.1` / `v2.1-exp` for current training experiments
-2. use the current inference service path with a compatible v2-family run directory
+2. use the current inference service path with a compatible v2-family model directory
 3. use the relocated `v1.1` script in `MelCNN-MGR/Lab/` only for legacy compatibility checks
 
 ## Command Lines
@@ -292,13 +292,21 @@ Notes:
 
 ### 6. Run direct inference
 
-Current direct inference path is the config-driven v2.1 family inference module:
+Current direct inference path is the config-driven v2.x family inference module:
 
 ```bash
-python MelCNN-MGR/model_inference/inference_logmel_cnn_v2_1.py \
-	--run-dir MelCNN-MGR/models/<logmel-v2-family-run-dir> \
+python MelCNN-MGR/model_inference/inference_logmel_cnn_v2_x.py \
+	--model-dir MelCNN-MGR/models/<logmel-v2-family-model-dir> \
 	audio_demo/Blues-Chris\ Stapleton-Tennessee\ Whiskey.mp3
 ```
+
+Companion example script for the current `logmel_cnn_v2_2.py` workflow:
+
+```bash
+python MelCNN-MGR/Lab/examples/inference_logmel_cnn_v2_x_example.py
+```
+
+That example now auto-discovers the newest `MelCNN-MGR/models/logmel-cnn-v2_2-*` directory and runs the renamed `inference_logmel_cnn_v2_x.py` module against files in `audio_demo/`.
 
 If you need the old fixed-shape v1.1 path, use `MelCNN-MGR/Lab/inference_logmel_cnn_v1_1.py` explicitly.
 
@@ -306,12 +314,12 @@ If you need the old fixed-shape v1.1 path, use `MelCNN-MGR/Lab/inference_logmel_
 
 ```bash
 python MelCNN-MGR/inference_web_service/app.py \
-	--run-dir MelCNN-MGR/models/<logmel-v2-family-run-dir> \
+	--model-dir MelCNN-MGR/models/<logmel-v2-family-model-dir> \
 	--host 127.0.0.1 \
 	--port 8000
 ```
 
-This service currently wraps `model_inference/inference_logmel_cnn_v2_1.py`, so use a compatible v2-family run directory.
+This service currently wraps `model_inference/inference_logmel_cnn_v2_x.py`, so use a compatible v2-family model directory.
 
 ### 8. Run the streaming demo app
 
@@ -340,7 +348,7 @@ For the current production-like training flow, the practical order is:
 3. log-mel build via `2_build_log_mel_dataset.py`
 4. EDA in `2_MelCNN_MGR_Manifest_LogMel_EDA.ipynb`
 5. training in `logmel_cnn_v2_1.py` as the primary training script, or `logmel_cnn_v2_1_exp.py` for controlled experiments
-6. if you need the currently documented web demo/service path, use a compatible v2-family inference run with `model_inference/inference_logmel_cnn_v2_1.py` / `inference_web_service/app.py`
+6. if you need the currently documented web demo/service path, use a compatible v2-family inference model directory with `model_inference/inference_logmel_cnn_v2_x.py` / `inference_web_service/app.py`
 7. streaming demo through `demo-app/web_audio_capture_v1.py`
 
 If you want to continue experimentation from an existing trained checkpoint while still producing a new run lineage, use `MelCNN-MGR/model_training/logmel_cnn_v2_1.py` or `MelCNN-MGR/model_training/logmel_cnn_v2_1_exp.py` with `--pretrained-model ...`.

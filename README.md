@@ -382,6 +382,7 @@ without re-running the training notebook.
 
 | Training source | Inference module | Example usage script |
 |---|---|---|
+| `logmel_cnn_v2_2.py` | `MelCNN-MGR/model_inference/inference_logmel_cnn_v2_x.py` | `MelCNN-MGR/Lab/examples/inference_logmel_cnn_v2_x_example.py` |
 | `baseline_logmel_cnn_v21.py` | `MelCNN-MGR/Lab/inference_logmel_v20a1.py` | `MelCNN-MGR/Lab/examples/inference_v20a1_v21_batch.py` |
 | `baseline_logmel_cnn_v20a1.py` | `MelCNN-MGR/Lab/inference_logmel_v20a1.py` | `MelCNN-MGR/Lab/examples/inference_v20a1_v21_batch.py` |
 | `baseline_logmel_cnn_v20a.py` | `MelCNN-MGR/Lab/inference_logmel_v20a.py` | `MelCNN-MGR/Lab/examples/inference_logmel_v20a_example.py` |
@@ -390,6 +391,8 @@ without re-running the training notebook.
 
 > [!NOTE]
 > `MelCNN-MGR/Lab/inference_logmel_v20a1.py` is the most robust legacy inference module and is used for both v20a1 (10s) and v21 (15s) models.
+
+For the current v2.x pipeline, use `MelCNN-MGR/model_inference/inference_logmel_cnn_v2_x.py` together with `MelCNN-MGR/Lab/examples/inference_logmel_cnn_v2_x_example.py`, which now auto-selects the newest `logmel-cnn-v2_2-*` model directory.
 
 **Example usage (v20a1/v21 Batch):**
 ```bash
@@ -415,6 +418,7 @@ MelCNN-MGR/
 │   ├── inference_logmel_v20.py             ← Inference module for v20
 │   ├── inference_mfcc_v5.py                ← Inference module for MFCC v5
 │   └── examples/
+│       ├── inference_logmel_cnn_v2_x_example.py
 │       ├── inference_logmel_v20a_example.py
 │       ├── inference_logmel_v20_example.py
 │       └── inference_mfcc_v5_example.py
