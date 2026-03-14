@@ -3,14 +3,14 @@
 		"target_genres": [
 			"Hip-Hop",
 			"Pop",
-			"Folk",
 			"Rock",
 			"Metal",
 			"Electronic",
 			"Classical",
 			"Jazz",
 			"Country",
-			"Blues"
+			"Blues",
+			"Bolero"
 		],
 		"number_of_samples_expected_each_genre": 1900,
 		"additional_samples_contribution_ratio_expected_each_genre": 0.5,

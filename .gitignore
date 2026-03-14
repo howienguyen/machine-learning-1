@@ -228,3 +228,7 @@ genre_downloads/
 mtg-processed-samples/
 
 audio_demo/
+
+MelCNN-MGR/cache2/
+MelCNN-MGR/cache1/
+MelCNN-MGR/cache*/

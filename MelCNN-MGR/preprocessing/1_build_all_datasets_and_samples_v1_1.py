@@ -75,6 +75,21 @@ Run the full pipeline in one command:
         --stage1a-sources both \
         --stage1b-sources both
 
+Preferred staged run profile:
+
+    python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py \
+        --mode stage1 \
+        --stage1a-sources fma \
+        --stage1b-sources fma
+
+    python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py \
+        --mode stage1 \
+        --stage1a-sources additional \
+        --stage1b-sources additional
+
+    python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py \
+        --mode stage2
+
 Selected output parquet files are overwritten on rerun.
 
 Stage 1a and Stage 1b source-selection modes

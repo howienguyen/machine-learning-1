@@ -14,7 +14,7 @@ data sources: FMA & additional_datasets -->
 MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py -->
 MelCNN-MGR/preprocessing/2_build_log_mel_dataset.py -->
 MelCNN-MGR/model_training/2_MelCNN_MGR_Manifest_LogMel_EDA.ipynb -->
-MelCNN-MGR/model_training/logmel_cnn_v2_1.py
+MelCNN-MGR/model_training/logmel_cnn_v2_2.py
 ```
 
 Interpretation:
@@ -24,8 +24,8 @@ Interpretation:
 3. `1_build_all_datasets_and_samples_v1_1.py` is the main manifest-and-sample preprocessing script
 4. `2_build_log_mel_dataset.py` is the main log-mel preprocessing script
 5. the manifest/log-mel EDA notebook is used to inspect readiness before training
-6. `logmel_cnn_v2_1.py` is the main current training entry point
-7. `logmel_cnn_v2_1_exp.py` is the experimental sibling for softer regularization tests
+6. `logmel_cnn_v2_2.py` is the main current training entry point
+7. `logmel_cnn_v2_1.py` and `logmel_cnn_v2_1_exp.py` remain useful older v2-family references
 
 ## Main Preprocessing Scripts
 
@@ -43,29 +43,34 @@ Current intent:
 
 The main current training scripts are:
 
-1. `MelCNN-MGR/model_training/logmel_cnn_v2_1.py`
-2. `MelCNN-MGR/model_training/logmel_cnn_v2_1_exp.py`
-3. `MelCNN-MGR/model_training/logmel_cnn_v1.py` and `logmel_cnn_v1_1.py` as legacy baselines
+1. `MelCNN-MGR/model_training/logmel_cnn_v2_2.py`
+2. `MelCNN-MGR/model_training/logmel_cnn_v2_1.py`
+3. `MelCNN-MGR/model_training/logmel_cnn_v2_1_exp.py`
+4. `MelCNN-MGR/model_training/logmel_cnn_v1.py` and `logmel_cnn_v1_1.py` as legacy baselines
 
 Current intent:
 
-1. `logmel_cnn_v2_1.py` is the primary current training script
-2. `logmel_cnn_v2_1_exp.py` is for controlled experimental changes relative to v2.1
+1. `logmel_cnn_v2_2.py` is the primary current training script
+2. `logmel_cnn_v2_1.py` and `logmel_cnn_v2_1_exp.py` remain useful comparison points inside the v2 family
 3. `v1` / `v1_1` remain useful as baseline references and for the currently documented inference service path
 
 ## Run Artifacts
 
-Each `logmel_cnn_v2_1*` run creates a dedicated run directory under `MelCNN-MGR/models/`.
+Each v2-family training run creates a dedicated run directory under `MelCNN-MGR/models/`.
 
-Typical contents:
+`logmel_cnn_v2_2.py` follows the same pattern with `v2_2`-named artifacts, while
+`logmel_cnn_v2_1.py` and `logmel_cnn_v2_1_exp.py` keep their corresponding
+`v2_1` / `v2_1_exp` names.
+
+Typical `v2_2` contents:
 
 ```text
-logmel-cnn-v2_1-YYYYMMDD-HHMMSS/
+logmel-cnn-v2_2-YYYYMMDD-HHMMSS/
     best_model_macro_f1.keras
-    logmel_cnn_v2_1.keras
+	logmel_cnn_v2_2.keras
     norm_stats.npz
     console_output.txt
-    run_report_logmel_cnn_v2_1.json
+	run_report_logmel_cnn_v2_2.json
 ```
 
 For `logmel_cnn_v2_1_exp.py`, the filenames are the corresponding `v2_1_exp` variants.
@@ -217,8 +222,36 @@ MelCNN-MGR/model_training/2_MelCNN_MGR_Manifest_LogMel_EDA.ipynb
 Primary current training script:
 
 ```bash
-python MelCNN-MGR/model_training/logmel_cnn_v2_1.py
+python MelCNN-MGR/model_training/logmel_cnn_v2_2.py
 ```
+
+Preferred staged run profile:
+
+```bash
+python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py \
+	--mode stage1 \
+	--stage1a-sources fma \
+	--stage1b-sources fma
+
+python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py \
+	--mode stage1 \
+	--stage1a-sources additional \
+	--stage1b-sources additional
+
+python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py \
+	--mode stage2
+
+python MelCNN-MGR/preprocessing/2_build_log_mel_dataset.py
+
+python MelCNN-MGR/model_training/logmel_cnn_v2_2.py
+```
+
+Why this profile is useful:
+
+1. it rebuilds FMA Stage 1a and Stage 1b artifacts together in one pass
+2. it rebuilds additional-dataset Stage 1a and Stage 1b artifacts together in one pass
+3. it then runs Stage 2 only after both source-specific sample manifests exist
+4. it keeps the final log-mel build and training steps explicit and easy to rerun independently
 
 Experimental variant:
 

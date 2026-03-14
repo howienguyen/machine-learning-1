@@ -33,11 +33,34 @@ The default output-root suffix follows
 `settings.data_sampling_settings.sample_length_sec` when available and falls
 back to 15 seconds if the settings file cannot be read. The actual extraction
 length remains manifest-driven unless `--sample-length-sec` is provided.
+
+Manifest rows are filtered by `settings.data_sampling_settings.target_genres`
+before log-mel generation so only currently configured genres are written.
+
+Preferred upstream/downstream run profile:
+
+    python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py \
+        --mode stage1 \
+        --stage1a-sources fma \
+        --stage1b-sources fma
+
+    python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py \
+        --mode stage1 \
+        --stage1a-sources additional \
+        --stage1b-sources additional
+
+    python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py \
+        --mode stage2
+
+    python MelCNN-MGR/preprocessing/2_build_log_mel_dataset.py
+
+    python MelCNN-MGR/model_training/logmel_cnn_v2_2.py
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
 import concurrent.futures as futures
 import hashlib
 import json
@@ -63,14 +86,30 @@ DEFAULT_SETTINGS_PATH = MELCNN_DIR / "settings.json"
 DEFAULT_SAMPLE_LENGTH_SEC = 15.0
 
 
-def load_default_sample_length_from_settings(settings_path: Path) -> float:
+def _load_data_sampling_settings(settings_path: Path) -> dict[str, object] | None:
     try:
-        payload = json.loads(settings_path.read_text())
+        raw_text = settings_path.read_text()
     except Exception:
-        return DEFAULT_SAMPLE_LENGTH_SEC
+        return None
+
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError:
+        try:
+            payload = ast.literal_eval(raw_text)
+        except (SyntaxError, ValueError):
+            return None
 
     config = payload.get("data_sampling_settings")
     if not isinstance(config, dict):
+        return None
+
+    return config
+
+
+def load_default_sample_length_from_settings(settings_path: Path) -> float:
+    config = _load_data_sampling_settings(settings_path)
+    if config is None:
         return DEFAULT_SAMPLE_LENGTH_SEC
 
     sample_length_sec = config.get("sample_length_sec")
@@ -78,6 +117,30 @@ def load_default_sample_length_from_settings(settings_path: Path) -> float:
         return DEFAULT_SAMPLE_LENGTH_SEC
 
     return float(sample_length_sec)
+
+
+def load_target_genres_from_settings(settings_path: Path) -> list[str]:
+    config = _load_data_sampling_settings(settings_path)
+    if config is None:
+        raise ValueError(
+            f"Could not read settings.data_sampling_settings from settings file: {settings_path}"
+        )
+
+    target_genres = config.get("target_genres")
+    if not isinstance(target_genres, list) or not target_genres:
+        raise ValueError(
+            f"Expected non-empty list at settings.data_sampling_settings.target_genres in {settings_path}"
+        )
+
+    cleaned_target_genres: list[str] = []
+    for genre in target_genres:
+        if not isinstance(genre, str) or not genre.strip():
+            raise ValueError(
+                f"Expected non-empty string values in settings.data_sampling_settings.target_genres in {settings_path}"
+            )
+        cleaned_target_genres.append(genre.strip())
+
+    return list(dict.fromkeys(cleaned_target_genres))
 
 DEFAULT_SAMPLE_LENGTH_FROM_SETTINGS = load_default_sample_length_from_settings(DEFAULT_SETTINGS_PATH)
 
@@ -109,6 +172,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--manifest",
         default=str(DEFAULT_MANIFEST_PATH),
         help="Path to sample-level parquet manifest. Defaults to manifest_final_samples.parquet.",
+    )
+    parser.add_argument(
+        "--settings",
+        default=str(DEFAULT_SETTINGS_PATH),
+        help="Path to MelCNN-MGR/settings.json used for target_genres filtering.",
     )
     parser.add_argument(
         "--out-root",
@@ -353,7 +421,7 @@ def _is_valid_npy(path: Path, expected_shape: tuple[int, int]) -> bool:
         return False
 
 
-def _load_manifest(path: Path, row_limit: int | None) -> pd.DataFrame:
+def _load_manifest(path: Path, row_limit: int | None, target_genres: list[str]) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"Manifest parquet not found: {path}")
 
@@ -381,6 +449,16 @@ def _load_manifest(path: Path, row_limit: int | None) -> pd.DataFrame:
 
     if "reason_code" in frame.columns:
         frame = frame[frame["reason_code"].astype(str) == "OK"].copy()
+
+    allowed_genres = {genre.strip() for genre in target_genres if genre.strip()}
+    before_genre_filter = len(frame)
+    frame = frame[frame["genre_top"].astype(str).isin(allowed_genres)].copy()
+    logging.info(
+        "Applied target_genres filter from settings: kept %d/%d manifest rows across genres=%s",
+        len(frame),
+        before_genre_filter,
+        sorted(allowed_genres),
+    )
 
     frame = frame[frame[split_column].notna()].copy()
     frame["split_dir"] = frame[split_column].map(_normalize_split_label)
@@ -666,19 +744,23 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     manifest_path = Path(args.manifest)
+    settings_path = Path(args.settings)
     out_root = Path(args.out_root)
     audio_backend = _detect_audio_backend(args.audio_backend)
     _ensure_librosa_available()
+    target_genres = load_target_genres_from_settings(settings_path)
 
     logging.info("Manifest: %s", manifest_path)
+    logging.info("Settings: %s", settings_path)
     logging.info("Output root: %s", out_root)
     logging.info("Audio backend: %s", audio_backend)
+    logging.info("Target genres from settings: %s", target_genres)
     logging.info(
         "Default sample length from settings/fallback: %.3fs",
         DEFAULT_SAMPLE_LENGTH_FROM_SETTINGS,
     )
 
-    manifest = _load_manifest(manifest_path, args.limit)
+    manifest = _load_manifest(manifest_path, args.limit, target_genres)
     target_sec = _resolve_sample_length(manifest, args.sample_length_sec)
     n_frames = int(target_sec * args.sample_rate / args.hop_length)
     logging.info(
@@ -694,8 +776,10 @@ def main(argv: list[str] | None = None) -> int:
 
     config = {
         "manifest": str(manifest_path),
+        "settings": str(settings_path),
         "out_root": str(out_root),
         "rows_requested": len(manifest),
+        "target_genres": target_genres,
         "sample_rate": args.sample_rate,
         "sample_length_sec": target_sec,
         "n_mels": args.n_mels,

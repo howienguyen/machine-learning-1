@@ -100,7 +100,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-num-segments",
         type=int,
-        default=240,  # 240
+        default=240,
         help=(
             "Maximum number of segments to extract from a single file. "
             "Files longer than min-duration-seconds but <= 30s use 1 segment; "
@@ -144,6 +144,16 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Number of worker processes used to handle top-level subfolders in parallel. "
             "Use 1 to disable multiprocessing."
+        ),
+    )
+    parser.add_argument(
+        "--parallel-by",
+        choices=["subdir", "file"],
+        default="file",
+        help=(
+            "How work is divided across multiple processes. "
+            "'subdir' assigns one top-level input subfolder per worker; "
+            "'file' assigns individual audio files to workers."
         ),
     )
     parser.add_argument(
@@ -344,6 +354,154 @@ def write_audio(path: Path, waveform: np.ndarray, sample_rate: int) -> None:
         return
 
     sf.write(path, waveform.T, sample_rate)
+
+
+def process_audio_file(
+    audio_path: Path,
+    input_dir: Path,
+    output_dir: Path,
+    backend: str,
+    segment_seconds: float,
+    max_num_segments: int,
+    min_duration_seconds: float,
+    edge_buffer_seconds: float,
+    overwrite: bool,
+    quiet: bool,
+) -> dict[str, int]:
+    written_segments = 0
+
+    try:
+        if backend == "ffmpeg":
+            duration_seconds = probe_duration_ffprobe(audio_path)
+            waveform = None
+            sample_rate = None
+        else:
+            librosa = _get_librosa()
+            waveform, sample_rate = librosa.load(str(audio_path), sr=None, mono=False)
+            waveform = np.asarray(waveform, dtype=np.float32)
+            duration_seconds = waveform.shape[-1] / float(sample_rate)
+
+        source = audio_path.relative_to(input_dir)
+        source_label = f"[file:{source}]"
+
+        if duration_seconds <= min_duration_seconds:
+            _log_progress(
+                quiet,
+                f"{source_label} SKIP duration={duration_seconds:.2f}s",
+            )
+            return {
+                "audio_files_found": 1,
+                "processed_files": 0,
+                "skipped_short": 1,
+                "failed_files": 0,
+                "written_segments": 0,
+            }
+
+        num_segments = choose_num_segments(
+            duration_seconds=duration_seconds,
+            segment_seconds=segment_seconds,
+            max_num_segments=max_num_segments,
+        )
+
+        if num_segments < 1:
+            _log_progress(
+                quiet,
+                f"{source_label} SKIP duration={duration_seconds:.2f}s segment_seconds={segment_seconds:.2f}s",
+            )
+            return {
+                "audio_files_found": 1,
+                "processed_files": 0,
+                "skipped_short": 1,
+                "failed_files": 0,
+                "written_segments": 0,
+            }
+
+        start_times = choose_start_times(
+            duration_seconds=duration_seconds,
+            segment_seconds=segment_seconds,
+            num_segments=num_segments,
+            edge_buffer_seconds=edge_buffer_seconds,
+        )
+        if len(start_times) != num_segments:
+            _log(f"FAIL start-time generation: {audio_path}", flush=True)
+            return {
+                "audio_files_found": 1,
+                "processed_files": 0,
+                "skipped_short": 0,
+                "failed_files": 1,
+                "written_segments": 0,
+            }
+
+        relative_parent = audio_path.parent.relative_to(input_dir)
+        output_parent = output_dir / relative_parent
+
+        for index, start_seconds in enumerate(start_times, start=1):
+            output_name = f"{audio_path.stem}__seg{index:02d}_start{start_seconds:06.2f}s.wav"
+            output_path = output_parent / output_name
+
+            if output_path.exists() and not overwrite:
+                continue
+
+            if backend == "ffmpeg":
+                extract_segment_ffmpeg(
+                    input_path=audio_path,
+                    output_path=output_path,
+                    start_seconds=start_seconds,
+                    segment_seconds=segment_seconds,
+                    overwrite=overwrite,
+                )
+            else:
+                segment = slice_audio(
+                    waveform=waveform,
+                    sample_rate=sample_rate,
+                    start_seconds=start_seconds,
+                    segment_seconds=segment_seconds,
+                )
+
+                expected_samples = int(round(segment_seconds * sample_rate))
+                if segment.shape[-1] < expected_samples:
+                    _log(
+                        f"FAIL short slice: {audio_path} seg{index:02d} got {segment.shape[-1]} samples, "
+                        f"expected {expected_samples}",
+                        flush=True,
+                    )
+                    return {
+                        "audio_files_found": 1,
+                        "processed_files": 0,
+                        "skipped_short": 0,
+                        "failed_files": 1,
+                        "written_segments": written_segments,
+                    }
+
+                write_audio(output_path, segment, sample_rate)
+
+            written_segments += 1
+            _log_progress(
+                quiet,
+                f"{source_label} WRITE -> {output_path.relative_to(output_dir)} seg={index:02d} start={start_seconds:.2f}s",
+            )
+
+        _log_progress(
+            quiet,
+            f"{source_label} OK segments={num_segments} starts={[round(value, 2) for value in start_times]}",
+        )
+        return {
+            "audio_files_found": 1,
+            "processed_files": 1,
+            "skipped_short": 0,
+            "failed_files": 0,
+            "written_segments": written_segments,
+        }
+
+    except Exception as exc:
+        _log(f"FAIL: {audio_path} ({exc})", flush=True)
+        return {
+            "audio_files_found": 1,
+            "processed_files": 0,
+            "skipped_short": 0,
+            "failed_files": 1,
+            "written_segments": written_segments,
+        }
 
 
 def process_subfolder(
@@ -554,8 +712,10 @@ def main() -> None:
 
     print(f"backend: {backend}")
     requested_workers = max(1, args.num_workers)
-    max_workers = min(requested_workers, len(subdirs), os.cpu_count() or 1)
+    parallel_items = subdirs if args.parallel_by == "subdir" else audio_files
+    max_workers = min(requested_workers, len(parallel_items), os.cpu_count() or 1)
     print(f"num_workers: {max_workers}")
+    print(f"parallel_by: {args.parallel_by}")
 
     processed_files = 0
     skipped_short = 0
@@ -580,6 +740,38 @@ def main() -> None:
             skipped_short += result["skipped_short"]
             failed_files += result["failed_files"]
             written_segments += result["written_segments"]
+    elif args.parallel_by == "file":
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    process_audio_file,
+                    audio_path,
+                    input_dir,
+                    output_dir,
+                    backend,
+                    args.segment_seconds,
+                    args.max_num_segments,
+                    args.min_duration_seconds,
+                    args.edge_buffer_seconds,
+                    args.overwrite,
+                    args.quiet,
+                ): audio_path
+                for audio_path in audio_files
+            }
+
+            for future in as_completed(futures):
+                audio_path = futures[future]
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    failed_files += 1
+                    _log(f"FAIL worker file: {audio_path} ({exc})")
+                    continue
+
+                processed_files += result["processed_files"]
+                skipped_short += result["skipped_short"]
+                failed_files += result["failed_files"]
+                written_segments += result["written_segments"]
     else:
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             futures = {
