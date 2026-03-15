@@ -2,5 +2,8 @@
     "workbench.editorAssociations": {
         "*.copilotmd": "vscode.markdown.preview.editor",
         "file:/**/*.parquet": "jupyter-data-wrangler"
-    }
+    },
+    "python.analysis.extraPaths": [
+        "./utils"
+    ]
 }

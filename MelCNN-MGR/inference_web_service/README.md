@@ -13,6 +13,14 @@ This service exposes `MelCNN-MGR/model_inference/inference_logmel_cnn_v2_x.py` o
 
 ## Run
 
+Install a WebSocket backend first if your environment only has bare `uvicorn`:
+
+```bash
+pip install websockets
+```
+
+You can also use `pip install 'uvicorn[standard]'` instead.
+
 ```bash
 python MelCNN-MGR/inference_web_service/app.py \
   --model-dir MelCNN-MGR/models/<logmel-v2-family-model-dir> \
