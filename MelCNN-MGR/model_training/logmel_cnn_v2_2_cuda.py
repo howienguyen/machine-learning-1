@@ -64,6 +64,7 @@ from types import SimpleNamespace
 
 
 os.environ["TF_XLA_FLAGS"] = "--tf_xla_auto_jit=-1"
+os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 os.environ["ONEDNN_VERBOSE"] = "none"
 os.environ["DNNL_VERBOSE"] = "0"
 
@@ -80,6 +81,17 @@ from tensorflow.keras import layers
 
 
 warnings.filterwarnings("ignore", category=UserWarning)
+
+
+def _configure_tensorflow_runtime() -> None:
+    try:
+        tf.config.optimizer.set_experimental_options(
+            {
+                "layout_optimizer": False,
+            }
+        )
+    except Exception as exc:
+        print(f"[WARN] Failed to disable TensorFlow layout optimizer: {exc}")
 
 
 _ORIGINAL_STDOUT = sys.stdout
@@ -135,10 +147,14 @@ def _start_console_capture(log_path: Path) -> None:
 
 atexit.register(_stop_console_capture)
 
+_configure_tensorflow_runtime()
+
 print(f"Python     : {platform.python_version()}")
 print(f"TensorFlow : {tf.__version__}")
 keras.mixed_precision.set_global_policy("float32")
 print(f"XLA auto-JIT: {os.environ['TF_XLA_FLAGS']}")
+print(f"oneDNN opts : {os.environ['TF_ENABLE_ONEDNN_OPTS']}")
+print(f"Layout opt  : disabled")
 print(f"Precision  : {keras.mixed_precision.global_policy().name}")
 
 
