@@ -216,10 +216,10 @@ _start_console_capture(CONSOLE_LOG_PATH)
 print(f"Run directory : {RUN_DIR}")
 print(f"Console log   : {CONSOLE_LOG_PATH}")
 
-EPOCHS = int(os.environ.get("LOGMEL_CNN_EPOCHS", "99"))
-BATCH_SIZE = int(os.environ.get("LOGMEL_CNN_BATCH_SIZE", "32"))
+EPOCHS = 136
+BATCH_SIZE = 64
 LABEL_SMOOTHING = 0.0            # Mixup already softens labels; keep CE targets sharp otherwise
-WEIGHT_DECAY = 1e-4                # v2.1: 1e-4 (was v2: 5e-4) — lighter with Mixup+dropout active
+WEIGHT_DECAY = 1e-4                # L2 Regularization - v2.1: 1e-4 (was v2: 5e-4) — lighter with Mixup+dropout active
 
 SPEC_AUG_FREQ_MASK = 24            # inherited mask size; v2.1 reduces total masking via num_masks=1
 SPEC_AUG_TIME_MASK = 40            # inherited mask size; v2.1 reduces total masking via num_masks=1
@@ -236,14 +236,14 @@ FINAL_DROPOUT_RATE = 0.20           # v2.1: 0.20 (was v2: 0.25) — wider bottle
 
 STANDARD_EARLY_STOP_PATIENCE = 9
 STANDARD_EARLY_STOP_MIN_DELTA = 0.002
-STANDARD_EARLY_STOP_START_EPOCH = 36
+STANDARD_EARLY_STOP_START_EPOCH = 66
 STANDARD_EARLY_STOP_RESTORE_BEST_WEIGHTS = True
 
-GAP_EARLY_STOP_THRESHOLD = 0.13
-GAP_EARLY_STOP_PATIENCE = 6
+GAP_EARLY_STOP_THRESHOLD = 0.1
+GAP_EARLY_STOP_PATIENCE = 9
 GAP_EARLY_STOP_MIN_DELTA = 0.001
 GAP_EARLY_STOP_REQUIRE_VAL_NOT_IMPROVING = True
-GAP_EARLY_STOP_VAL_MACRO_F1_MIN_THRESHOLD = 0.70
+GAP_EARLY_STOP_VAL_MACRO_F1_MIN_THRESHOLD = 0.80
 GAP_EARLY_STOP_START_EPOCH = 60
 GAP_EARLY_STOP_RESTORE_BEST_WEIGHTS = True
 
@@ -1004,7 +1004,7 @@ total_steps = EPOCHS * steps_per_epoch
 warmup_steps = WARMUP_EPOCHS * steps_per_epoch
 
 
-@tf.keras.saving.register_keras_serializable(package="MelCNN")
+@tf.keras.utils.register_keras_serializable(package="MelCNN")
 class CosineAnnealingWithWarmup(tf.keras.optimizers.schedules.LearningRateSchedule):
     def __init__(self, warmup_steps, total_steps, lr_max, lr_min):
         super().__init__()

@@ -232,3 +232,7 @@ audio_demo/
 MelCNN-MGR/cache2/
 MelCNN-MGR/cache1/
 MelCNN-MGR/cache*/
+
+classwork/solar/dataset/
+classwork/solar/models/
+classwork/solar/tensorflow_checkpoints

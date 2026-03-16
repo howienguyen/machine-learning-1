@@ -100,7 +100,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-num-segments",
         type=int,
-        default=240,
+        default=300,
         help=(
             "Maximum number of segments to extract from a single file. "
             "Files longer than min-duration-seconds but <= 30s use 1 segment; "
@@ -140,7 +140,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--num-workers",
         type=int,
-        default=3,
+        default=6,
         help=(
             "Number of worker processes used to handle top-level subfolders in parallel. "
             "Use 1 to disable multiprocessing."

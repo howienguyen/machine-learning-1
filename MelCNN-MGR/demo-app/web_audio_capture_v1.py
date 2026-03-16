@@ -1,10 +1,36 @@
+
+"""Web audio capture demo app.
+
+This Flask app captures system audio (Windows WASAPI loopback), maintains a
+short rolling buffer for playback and reconnect replay, and sends fixed-size
+snapshots to a separate inference service. It supports two inference event
+types produced by the server:
+
+- "partial_result": a live, rolling prediction produced while capture is
+    running. Partial results are emitted repeatedly during a session (client
+    sends snapshots at `SEND_INTERVAL_SEC`) and are stored in
+    `_InferenceState.last_partial`.
+- "final_result": a terminal prediction produced when the capture session is
+    being stopped. The capture loop flushes one last snapshot and calls
+    finalize(), which results in a `final_result` stored in
+    `_InferenceState.last_final`.
+
+Notes:
+- The UI polls `/inference/status` frequently to refresh `last_partial` and
+    `last_final` values; `partial` is for live updates and `final` marks the
+    session-closing label (they may be identical if the last partial used the
+    same audio window).
+- This module is designed for demonstration and local development; it
+    intentionally keeps a compact, explicit behavior for save/replay and
+    reconnect handling.
+"""
+
 # Run guide:
 # 1. Start the inference service first, for example:
 #    python MelCNN-MGR/inference_web_service/app.py --model-dir MelCNN-MGR/models/logmel-cnn-v2_1-YYYYMMDD-HHMMSS
-# 2. Then start this Flask capture app, optionally overriding the WebSocket target or snapshot-send interval:
-#    MELCNN_INFERENCE_WS_URL=ws://127.0.0.1:8000/ws/stream MELCNN_INFERENCE_SEND_INTERVAL_SEC=3 python MelCNN-MGR/demo-app/web_audio_capture_v1.py
+# 2. Then start this Flask capture app, optionally overriding the REST target or snapshot-send interval:
+#    MELCNN_INFERENCE_API_URL=http://127.0.0.1:8000/predict MELCNN_INFERENCE_SEND_INTERVAL_SEC=3 python MelCNN-MGR/demo-app/web_audio_capture_v1.py
 # 3. Open http://127.0.0.1:5000 in a browser and use Capture/Stop to stream system audio to the inference service.
-
 
 import struct
 import threading
@@ -15,22 +41,24 @@ import os
 import array
 import audioop
 import math
+import random
 import sys
 import logging
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
 if str(WORKSPACE_ROOT) not in sys.path:
     sys.path.insert(0, str(WORKSPACE_ROOT))
 
-from flask import Flask, Response, render_template_string
+from flask import Flask, Response, render_template_string, send_from_directory
 try:
     import pyaudiowpatch as pyaudio  # type: ignore[import-not-found]
     PYAUDIO_IMPORT_ERROR = None
 except Exception as exc:
     pyaudio = None
     PYAUDIO_IMPORT_ERROR = exc
-import websocket
+import requests
 
 if sys.platform != "win32":
     print("This program uses audio_backend which only works on Windows.")
@@ -43,31 +71,61 @@ LOGGER = logging.getLogger("melcnn.demo_app.web_audio_capture")
 FRAMES_PER_BUFFER = 4096
 # Rolling local clip length kept for playback/reconnect replay purposes.
 CLIP_SECONDS = 60
-# Preferred capture and outbound inference sample rate; stream opening falls back
-# to device-supported rates if needed.
-TARGET_SAMPLE_RATE = 22050
-# Preferred capture and outbound inference channel count.
-TARGET_CHANNELS = 1
+# Outbound inference format required by the service/model path.
+INFERENCE_SAMPLE_RATE = 22050
+INFERENCE_CHANNELS = 1
+# Preferred capture quality for replay/saved clips. Stream opening still falls
+# back to other device-supported formats if needed.
+PREFERRED_CAPTURE_SAMPLE_RATES = (48000, 44100, 22050)
+PREFERRED_CAPTURE_CHANNELS = (2, 1)
 # Model inference contract currently requires a full 15-second window.
 MIN_INFERENCE_SECONDS = 15.0
-# Inference service WebSocket endpoint consumed by this capture client.
-INFERENCE_WS_URL = os.environ.get("MELCNN_INFERENCE_WS_URL", "ws://172.17.233.113:8000/ws/stream")
+# Inference service REST endpoint consumed by this capture client. If only a
+# websocket URL is provided, it is converted to the matching /predict URL.
+def _resolve_inference_api_url() -> str:
+    raw_value = os.environ.get("MELCNN_INFERENCE_API_URL")
+    if not raw_value:
+        raw_value = os.environ.get("MELCNN_INFERENCE_WS_URL", "http://172.17.233.113:8000/predict")
+
+    if "://" not in raw_value:
+        raw_value = f"http://{raw_value}"
+
+    parsed = urlsplit(raw_value)
+    scheme = parsed.scheme.lower()
+    if scheme in {"ws", "wss"}:
+        scheme = "https" if scheme == "wss" else "http"
+        path = "/predict" if not parsed.path or parsed.path == "/ws/stream" else parsed.path
+        return urlunsplit((scheme, parsed.netloc, path, parsed.query, parsed.fragment))
+    path = parsed.path or "/predict"
+    return urlunsplit((scheme, parsed.netloc, path, parsed.query, parsed.fragment))
+
+
+INFERENCE_API_URL = _resolve_inference_api_url()
 # Inference mode requested from the server for each stream session.
-INFERENCE_MODE = "three_crop"
+INFERENCE_MODE = "single_crop"
 # Server-side partial-result cadence once a full latest-window snapshot is available.
-EMIT_INTERVAL_SEC = 3
+EMIT_INTERVAL_SEC = 1
 # Client-side cadence for sending the latest MIN_INFERENCE_SECONDS snapshot to the service.
-SEND_INTERVAL_SEC = 3
-# WebSocket connect timeout for initial handshake and reconnect attempts.
-WS_CONNECT_TIMEOUT_SEC = float(os.environ.get("MELCNN_INFERENCE_WS_CONNECT_TIMEOUT_SEC", "15.0"))
-# Socket receive timeout used after the websocket is connected.
-WS_RECV_TIMEOUT_SEC = float(os.environ.get("MELCNN_INFERENCE_WS_RECV_TIMEOUT_SEC", "0.5"))
+SEND_INTERVAL_SEC = 5
+# REST connect timeout for service probes and inference requests.
+REST_CONNECT_TIMEOUT_SEC = 15.0
+
+# REST response timeout for inference requests.
+REST_REQUEST_TIMEOUT_SEC = 30.0
+
 # Background retry cadence used when the inference service is unavailable.
 RECONNECT_RETRY_INTERVAL_SEC = 10
 # Maximum number of consecutive reconnect attempts before inference is disabled for the current capture session.
 RECONNECT_MAX_ATTEMPTS = 6
 # Amount of recent PCM to replay after reconnect so the service can restore one full inference window.
 RECONNECT_REPLAY_SECONDS = 15.0
+MAX_GENRE_RESULT_NOTES = 8
+TREND_WINDOW_SECONDS = 180
+MAX_TREND_HISTORY_POINTS = 512
+DEMO_APP_IMAGES_DIR = (WORKSPACE_ROOT / "MelCNN-MGR" / "demo-app" / "images").resolve()
+CAPTURED_AUDIO_DIR = (WORKSPACE_ROOT / "MelCNN-MGR" / "data" / "tmp_demo_app").resolve()
+MAX_SAVED_CAPTURED_CLIPS = 10
+SAVE_LATEST_CAPTURED_CLIPS = True
 
 app = Flask(__name__)
 
@@ -123,13 +181,13 @@ def _convert_pcm16_for_inference(
     if input_channels > 1:
         pcm_bytes = audioop.tomono(pcm_bytes, 2, 0.5, 0.5)
 
-    if input_sample_rate != TARGET_SAMPLE_RATE:
+    if input_sample_rate != INFERENCE_SAMPLE_RATE:
         pcm_bytes, _ = audioop.ratecv(
             pcm_bytes,
             2,
             1,
             input_sample_rate,
-            TARGET_SAMPLE_RATE,
+            INFERENCE_SAMPLE_RATE,
             None,
         )
 
@@ -149,6 +207,71 @@ def create_wav_header(sample_rate, channels, data_size_bytes):
         b'fmt ', 16, 1, channels, sample_rate, byte_rate, block_align, bits_per_sample,
         b'data', data_size
     )
+
+
+def _pcm_payload_to_wav_bytes(pcm_bytes: bytes, sample_rate: int, channels: int) -> bytes:
+    if not pcm_bytes:
+        return b""
+    return create_wav_header(sample_rate, channels, len(pcm_bytes)) + pcm_bytes
+
+
+def _utc_timestamp() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _sanitize_filename_component(value: str) -> str:
+    cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in value)
+    cleaned = cleaned.strip("._")
+    return cleaned or "capture"
+
+
+def _trim_saved_captured_clips(directory: Path, keep_latest: int) -> None:
+    wav_files = sorted(directory.glob("*.wav"), key=lambda path: path.stat().st_mtime, reverse=True)
+    for stale_path in wav_files[keep_latest:]:
+        stale_path.unlink(missing_ok=True)
+
+
+def _save_captured_clip(wav_bytes: bytes, sample_rate: int, channels: int, source_tag: str = "capture") -> Path | None:
+    if not SAVE_LATEST_CAPTURED_CLIPS:
+        return None
+    if not wav_bytes:
+        return None
+    CAPTURED_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    millis = int((time.time() % 1) * 1000)
+    clip_name = f"{timestamp}-{millis:03d}-{_sanitize_filename_component(source_tag)}-{sample_rate}hz-{channels}ch.wav"
+    clip_path = CAPTURED_AUDIO_DIR / clip_name
+    clip_path.write_bytes(wav_bytes)
+    _trim_saved_captured_clips(CAPTURED_AUDIO_DIR, MAX_SAVED_CAPTURED_CLIPS)
+    LOGGER.info("Saved outbound clip path=%s bytes=%s sample_rate=%s channels=%s", clip_path, len(wav_bytes), sample_rate, channels)
+    return clip_path
+
+
+def _demo_asset_url(filename: str) -> str:
+    return f"/demo-assets/{filename}"
+
+
+def _choose_falling_asset(default_filename: str) -> str:
+    if random.random() < 0.25:
+        return random.choice(["music1.png", "music2.png"])
+    return default_filename
+
+
+def _build_falling_asset_sets() -> list[list[str]]:
+    base_assets = [
+        "leaves1.png",
+        "leaves2.png",
+        "leaves3.png",
+        "leaves4.png",
+        "leaves1.png",
+        "leaves2.png",
+        "leaves3.png",
+        "leaves4.png",
+    ]
+    return [
+        [_demo_asset_url(_choose_falling_asset(asset_name)) for asset_name in base_assets]
+        for _ in range(3)
+    ]
 
 class _RollingAudioBuffer:
     def __init__(self):
@@ -218,6 +341,14 @@ rolling_buffer = _RollingAudioBuffer()
 
 
 def _latest_inference_snapshot_pcm() -> bytes:
+    """Return the newest inference-ready PCM snapshot from the rolling buffer.
+
+    The inference service currently expects a full `MIN_INFERENCE_SECONDS`
+    window in mono 16-bit PCM at `INFERENCE_SAMPLE_RATE`. This helper takes the
+    latest capture-window PCM from `_RollingAudioBuffer` and converts it into
+    the model-serving contract used for both rolling partial requests and the
+    final session flush.
+    """
     with rolling_buffer._lock:
         sample_rate = rolling_buffer.sample_rate
         channels = rolling_buffer.channels
@@ -230,11 +361,31 @@ def _latest_inference_snapshot_pcm() -> bytes:
 
 
 def _latest_inference_replay_chunks() -> list[bytes]:
+    """Return replay payloads used to restore one full inference window.
+
+    The REST client only needs the latest converted snapshot right now, so this
+    returns a single-item list when buffered audio is available. The list shape
+    keeps the reconnect/finalize interfaces aligned with older streaming-style
+    replay logic.
+    """
     payload = _latest_inference_snapshot_pcm()
     return [payload] if payload else []
 
 
 class _InferenceState:
+    """Thread-safe container holding current inference session state.
+
+    Fields of interest:
+    - `last_partial`: most recent payload from an in-session `partial_result`.
+    - `last_final`: most recent payload from a session-ending `final_result`.
+
+    `partial_result` represents ongoing live guesses from the latest window
+    (updated repeatedly while capturing). `final_result` represents the
+    definitive prediction when the capture session is flushed and finalized.
+    Both entries are plain dict payloads received from the inference service
+    and are updated under an internal lock to be safe for concurrent reads by
+    the Flask UI polling thread.
+    """
     def __init__(self):
         self._lock = threading.Lock()
         self.reset()
@@ -244,7 +395,8 @@ class _InferenceState:
             self.connected = False
             self.streaming = False
             self.reconnecting = False
-            self.ws_url = INFERENCE_WS_URL
+            self.transport = 'rest'
+            self.ws_url = INFERENCE_API_URL
             self.mode = INFERENCE_MODE
             self.sample_rate = None
             self.channels = None
@@ -265,6 +417,46 @@ class _InferenceState:
             self.last_server_event = None
             self.last_error = None
             self.last_detail = None
+            self.genre_result_notes = {}
+            self.prediction_trend_history = deque(maxlen=MAX_TREND_HISTORY_POINTS)
+
+    def _record_prediction_note_locked(self, payload):
+        genre = str(payload.get('genre') or '').strip()
+        if not genre:
+            return
+        notes = self.genre_result_notes.get(genre)
+        if notes is None:
+            notes = deque(maxlen=MAX_GENRE_RESULT_NOTES)
+            self.genre_result_notes[genre] = notes
+        notes.append(
+            {
+                'timestamp': _utc_timestamp(),
+                'event': payload.get('event'),
+                'genre': genre,
+                'confidence': payload.get('confidence'),
+                'received_chunks': payload.get('received_chunks'),
+                'buffer_seconds': payload.get('buffer_seconds'),
+            }
+        )
+
+    def _record_prediction_trend_locked(self, payload):
+        probs = payload.get('probs')
+        genre_classes = payload.get('genre_classes')
+        if not isinstance(probs, list) or not isinstance(genre_classes, list):
+            return
+        if len(probs) != len(genre_classes):
+            return
+        ts_epoch = float(time.time())
+        self.prediction_trend_history.append(
+            {
+                'timestamp': payload.get('timestamp') or _utc_timestamp(),
+                'ts_epoch': ts_epoch,
+                'event': payload.get('event'),
+                'genre': payload.get('genre'),
+                'probs': probs,
+                'genre_classes': genre_classes,
+            }
+        )
 
     def on_session_started(self, sample_rate, channels):
         with self._lock:
@@ -306,7 +498,8 @@ class _InferenceState:
             self.reconnect_attempt = 0
             self.last_backoff_seconds = 0.0
             self.last_server_event = 'reconnected'
-            self.last_detail = 'WebSocket stream reconnected and session restarted.'
+            self.last_detail = 'REST inference requests resumed successfully.'
+            self.last_error = None
 
     def on_transport_lost(self, message):
         with self._lock:
@@ -342,14 +535,27 @@ class _InferenceState:
             self.last_detail = payload.get('detail', self.last_detail)
             event = payload.get('event')
             if event == 'partial_result':
+                if not payload.get('timestamp'):
+                    payload = dict(payload)
+                    payload['timestamp'] = _utc_timestamp()
                 self.last_partial = payload
+                self._record_prediction_note_locked(payload)
+                self._record_prediction_trend_locked(payload)
+                self.last_error = None
             elif event == 'final_result':
+                if not payload.get('timestamp'):
+                    payload = dict(payload)
+                    payload['timestamp'] = _utc_timestamp()
                 self.last_final = payload
                 self.streaming = False
+                self._record_prediction_note_locked(payload)
+                self._record_prediction_trend_locked(payload)
+                self.last_error = None
             elif event == 'started':
                 self.connected = True
                 self.streaming = True
                 self.reconnecting = False
+                self.last_error = None
             elif event == 'error':
                 self.last_error = payload.get('detail') or 'Unknown websocket error'
 
@@ -368,10 +574,12 @@ class _InferenceState:
 
     def snapshot(self):
         with self._lock:
+            cutoff = time.time() - TREND_WINDOW_SECONDS
             return {
                 'connected': self.connected,
                 'streaming': self.streaming,
                 'reconnecting': self.reconnecting,
+                'transport': self.transport,
                 'ws_url': self.ws_url,
                 'mode': self.mode,
                 'sample_rate': self.sample_rate,
@@ -393,6 +601,15 @@ class _InferenceState:
                 'last_detail': self.last_detail,
                 'last_partial': self.last_partial,
                 'last_final': self.last_final,
+                'genre_result_notes': {
+                    genre: list(notes)
+                    for genre, notes in self.genre_result_notes.items()
+                },
+                'trend_window_seconds': TREND_WINDOW_SECONDS,
+                'prediction_trend_history': [
+                    point for point in self.prediction_trend_history
+                    if float(point.get('ts_epoch', 0.0) or 0.0) >= cutoff
+                ],
             }
 
 
@@ -400,27 +617,26 @@ inference_state = _InferenceState()
 
 
 class _StreamingInferenceClient:
-    def __init__(self, ws_url, mode, emit_interval_sec):
-        self.ws_url = ws_url
+    def __init__(self, api_url, mode, emit_interval_sec):
+        self.api_url = api_url
         self.mode = mode
         self.emit_interval_sec = float(emit_interval_sec)
         self.sample_rate = None
         self.channels = None
         self.frames_per_buffer = FRAMES_PER_BUFFER
-        self.stream_id_base = f'web-audio-capture-{int(time.time())}'
-        self.stream_generation = 0
-        self._ws = None
-        self._recv_thread = None
-        self._reconnect_thread = None
-        self._recv_stop = threading.Event()
-        self._retry_wakeup = threading.Event()
-        self._lock = threading.Lock()
-        self._reconnect_lock = threading.Lock()
+        self.health_url = self._build_health_url(api_url)
+        self._session = requests.Session()
         self._replay_chunks_provider = None
         self._ever_connected = False
-        self._next_retry_monotonic = 0.0
-        self._reconnect_attempts = 0
+        self._request_count = 0
+        self._failure_count = 0
+        self._available = False
         self._inference_disabled = False
+
+    @staticmethod
+    def _build_health_url(api_url):
+        parsed = urlsplit(api_url)
+        return urlunsplit((parsed.scheme, parsed.netloc, '/health', parsed.query, parsed.fragment))
 
     def configure_stream(self, sample_rate, channels, frames_per_buffer):
         self.sample_rate = int(sample_rate)
@@ -430,284 +646,173 @@ class _StreamingInferenceClient:
     def connect(self, sample_rate, channels, frames_per_buffer):
         self.configure_stream(sample_rate, channels, frames_per_buffer)
         LOGGER.info(
-            "WS client connect requested ws_url=%s sample_rate=%s channels=%s frames_per_buffer=%s mode=%s emit_interval_sec=%.3f",
-            self.ws_url,
+            "REST client connect requested api_url=%s sample_rate=%s channels=%s frames_per_buffer=%s mode=%s emit_interval_sec=%.3f",
+            self.api_url,
             self.sample_rate,
             self.channels,
             self.frames_per_buffer,
             self.mode,
             self.emit_interval_sec,
         )
-        self._ensure_reconnect_loop("Initial connection scheduled.")
+        self._probe_service("Initial connection scheduled.")
 
-    def _start_recv_thread(self):
-        self._recv_stop.clear()
-        self._recv_thread = threading.Thread(target=self._recv_loop, daemon=True)
-        self._recv_thread.start()
-
-    def _open_session(self):
-        LOGGER.info("WS opening websocket ws_url=%s", self.ws_url)
-        ws = websocket.create_connection(
-            self.ws_url,
-            timeout=WS_CONNECT_TIMEOUT_SEC,
-            enable_multithread=True,
-        )
-        ws.settimeout(WS_RECV_TIMEOUT_SEC)
-
+    def _probe_service(self, reason):
         try:
-            hello = ws.recv()
-            if isinstance(hello, str):
-                hello_payload = json.loads(hello)
-                LOGGER.info(
-                    "WS hello received sample_rate=%s clip_duration=%s supported_modes=%s",
-                    hello_payload.get('sample_rate'),
-                    hello_payload.get('clip_duration'),
-                    hello_payload.get('supported_modes'),
-                )
-                inference_state.on_server_message(hello_payload)
-        except Exception:
-            LOGGER.warning("WS hello not received before timeout; continuing with start event.")
+            response = self._session.get(
+                self.health_url,
+                timeout=(REST_CONNECT_TIMEOUT_SEC, REST_REQUEST_TIMEOUT_SEC),
+            )
+            response.raise_for_status()
+            payload = response.json()
+            LOGGER.info(
+                "REST health ok api_url=%s sample_rate=%s clip_duration=%s detail=%s",
+                self.api_url,
+                payload.get('sample_rate'),
+                payload.get('clip_duration'),
+                reason,
+            )
+            if self._ever_connected:
+                if not self._available:
+                    inference_state.on_reconnected()
+            else:
+                inference_state.on_session_started(self.sample_rate, self.channels)
+                self._ever_connected = True
+            self._available = True
+            self._failure_count = 0
+            return True
+        except Exception as exc:
+            LOGGER.warning("REST health probe failed api_url=%s reason=%s error=%s", self.api_url, reason, exc)
+            self._available = False
+            inference_state.on_transport_lost(f'Rest health probe failed: {exc}')
+            return False
 
-        stream_id = f'{self.stream_id_base}-r{self.stream_generation}'
-        self.stream_generation += 1
-        start_payload = {
-            'type': 'start',
-            'stream_id': stream_id,
-            'encoding': 'pcm_s16le',
-            'sample_rate': self.sample_rate,
-            'channels': self.channels,
-            'frames_per_buffer': self.frames_per_buffer,
-            'mode': self.mode,
-            'emit_interval_sec': self.emit_interval_sec,
-            # Tell the service that each chunk is already the newest full
-            # snapshot window, so it should replace its buffer instead of
-            # appending deltas.
-            'replace_buffer_on_chunk': True,
-        }
-        ws.send(json.dumps(start_payload))
-        LOGGER.info(
-            "WS start sent stream_id=%s sample_rate=%s channels=%s frames_per_buffer=%s emit_interval_sec=%.3f replace_buffer_on_chunk=%s connect_timeout=%.3f recv_timeout=%.3f",
-            stream_id,
-            self.sample_rate,
-            self.channels,
-            self.frames_per_buffer,
-            self.emit_interval_sec,
-            True,
-            WS_CONNECT_TIMEOUT_SEC,
-            WS_RECV_TIMEOUT_SEC,
+    def _handle_request_failure(self, detail):
+        self._available = False
+        self._failure_count += 1
+        LOGGER.error("REST inference request failed api_url=%s failures=%s detail=%s", self.api_url, self._failure_count, detail)
+        if self._failure_count >= RECONNECT_MAX_ATTEMPTS:
+            self._inference_disabled = True
+            inference_state.on_inference_disabled(
+                'Inference service could not be reached after '
+                f'{RECONNECT_MAX_ATTEMPTS} retries. Capture will continue without inference '
+                'for the rest of this session.'
+            )
+            return
+        inference_state.on_reconnecting(self._failure_count, RECONNECT_RETRY_INTERVAL_SEC)
+        inference_state.on_transport_lost(detail)
+        inference_state.on_reconnect_scheduled(
+            RECONNECT_RETRY_INTERVAL_SEC,
+            f'{detail} Retrying REST inference on next send interval.',
         )
 
-        with self._lock:
-            self._ws = ws
-        self._start_recv_thread()
+    def _mark_request_success(self):
+        if self._ever_connected:
+            if not self._available:
+                inference_state.on_reconnected()
+        else:
+            inference_state.on_session_started(self.sample_rate, self.channels)
+            self._ever_connected = True
+        self._available = True
+        self._failure_count = 0
 
-    def _clear_connection(self):
-        with self._lock:
-            ws = self._ws
-            self._ws = None
-        if ws is not None:
-            try:
-                ws.close()
-            except Exception:
-                pass
-
-    def _sleep_until_or_stop(self, deadline_monotonic):
-        while not self._recv_stop.is_set() and time.monotonic() < deadline_monotonic:
-            if self._retry_wakeup.is_set():
-                self._retry_wakeup.clear()
-                return
-            time.sleep(0.1)
-
-    def _ensure_reconnect_loop(self, reason, replay_chunks_provider=None):
+    def _post_snapshot(self, pcm_bytes, event_name, replay_chunks_provider=None):
         if replay_chunks_provider is not None:
             self._replay_chunks_provider = replay_chunks_provider
-        if self._recv_stop.is_set() or self._inference_disabled:
-            return
-        with self._reconnect_lock:
-            if self._reconnect_thread is not None and self._reconnect_thread.is_alive():
-                return
-            self._reconnect_thread = threading.Thread(
-                target=self._reconnect_loop,
-                args=(reason,),
-                daemon=True,
+        if self._inference_disabled:
+            return False
+
+        wav_bytes = _pcm_payload_to_wav_bytes(pcm_bytes, self.sample_rate, self.channels)
+        _save_captured_clip(
+            wav_bytes,
+            sample_rate=int(self.sample_rate or 0),
+            channels=int(self.channels or 0),
+            source_tag=f"sent-{event_name}",
+        )
+        payload_seconds = 0.0
+        if self.sample_rate and self.channels:
+            payload_seconds = len(pcm_bytes) / (self.sample_rate * self.channels * 2)
+
+        LOGGER.info(
+            "REST send snapshot api_url=%s bytes=%s wav_bytes=%s approx_seconds=%.3f event=%s",
+            self.api_url,
+            len(pcm_bytes),
+            len(wav_bytes),
+            payload_seconds,
+            event_name,
+        )
+
+        try:
+            response = self._session.post(
+                self.api_url,
+                data={'mode_form': self.mode},
+                files={'file': ('live_snapshot.wav', wav_bytes, 'audio/wav')},
+                timeout=(REST_CONNECT_TIMEOUT_SEC, REST_REQUEST_TIMEOUT_SEC),
             )
-            self._reconnect_thread.start()
-        LOGGER.info("WS reconnect loop ensured reason=%s", reason)
+            response.raise_for_status()
+            model_payload = response.json()
+        except Exception as exc:
+            self._handle_request_failure(f'REST /predict failed: {exc}')
+            return False
+
+        self._mark_request_success()
+        inference_state.on_payload_sent(payload_seconds)
+        self._request_count += 1
+
+        client_payload = dict(model_payload)
+        client_payload.update(
+            {
+                'event': event_name,
+                'received_chunks': self._request_count,
+                'buffer_seconds': round(payload_seconds, 3),
+                'is_warmup': False,
+                'detail': 'REST /predict response',
+            }
+        )
+        LOGGER.info(
+            "REST inference result api_url=%s event=%s genre=%s confidence=%.4f",
+            self.api_url,
+            event_name,
+            client_payload.get('genre'),
+            float(client_payload.get('confidence', 0.0) or 0.0),
+        )
+        inference_state.on_server_message(client_payload)
+        return True
 
     def request_manual_retry(self):
         self._inference_disabled = False
-        self._reconnect_attempts = 0
-        self._next_retry_monotonic = 0.0
-        self._retry_wakeup.set()
-        inference_state.on_reconnect_scheduled(0.0, 'Manual retry requested. Reconnecting now.')
-        self._ensure_reconnect_loop('Manual retry requested.')
-
-    def _reconnect_loop(self, reason):
-        while not self._recv_stop.is_set():
-            if self._inference_disabled:
-                return
-            ws = self._ws
-            if ws is not None:
-                return
-
-            now = time.monotonic()
-            deadline = max(now, self._next_retry_monotonic)
-            delay = max(0.0, deadline - now)
-            inference_state.on_reconnect_scheduled(
-                delay,
-                f'{reason} Retrying websocket connection in {max(delay, 0.0):.1f}s.',
-            )
-            LOGGER.warning(
-                "WS reconnect scheduled reason=%s delay=%.3fs attempts=%s",
-                reason,
-                delay,
-                self._reconnect_attempts,
-            )
-            if delay > 0:
-                self._sleep_until_or_stop(deadline)
-                if self._recv_stop.is_set():
-                    return
-
-            try:
-                self._open_session()
-                ws = self._ws
-                if ws is None:
-                    raise RuntimeError('Reconnect opened no websocket session.')
-                replay_chunks = self._replay_chunks_provider() if self._replay_chunks_provider is not None else []
-                for chunk in replay_chunks:
-                    ws.send_binary(chunk)
-                if replay_chunks:
-                    LOGGER.info(
-                        "WS replayed chunks count=%s bytes=%s",
-                        len(replay_chunks),
-                        sum(len(chunk) for chunk in replay_chunks),
-                    )
-                self._next_retry_monotonic = 0.0
-                if self._ever_connected:
-                    inference_state.on_reconnected()
-                    LOGGER.info("WS reconnected ws_url=%s", self.ws_url)
-                else:
-                    inference_state.on_session_started(self.sample_rate, self.channels)
-                    self._ever_connected = True
-                    LOGGER.info("WS session started ws_url=%s", self.ws_url)
-                self._reconnect_attempts = 0
-                return
-            except Exception as exc:
-                self._clear_connection()
-                self._reconnect_attempts += 1
-                LOGGER.exception("WS connect/reconnect failed ws_url=%s", self.ws_url)
-                if self._reconnect_attempts >= RECONNECT_MAX_ATTEMPTS:
-                    self._inference_disabled = True
-                    inference_state.on_inference_disabled(
-                        'Inference service could not be reached after '
-                        f'{RECONNECT_MAX_ATTEMPTS} retries. Capture will continue without inference '
-                        'for the rest of this session.'
-                    )
-                    return
-                self._next_retry_monotonic = time.monotonic() + RECONNECT_RETRY_INTERVAL_SEC
-                inference_state.on_transport_lost(
-                    f'WebSocket connect failed: {exc}. Retry {self._reconnect_attempts}/{RECONNECT_MAX_ATTEMPTS} '
-                    f'in {RECONNECT_RETRY_INTERVAL_SEC:.1f}s.'
-                )
-
-    def _recv_loop(self):
-        while not self._recv_stop.is_set():
-            if self._ws is None:
-                return
-            try:
-                message = self._ws.recv()
-            except websocket.WebSocketTimeoutException:
-                continue
-            except Exception as exc:
-                if not self._recv_stop.is_set():
-                    inference_state.on_transport_lost(f'WebSocket receive failed: {exc}')
-                    self._clear_connection()
-                    self._ensure_reconnect_loop(
-                        'Receive path lost websocket transport.',
-                        replay_chunks_provider=self._replay_chunks_provider,
-                    )
-                return
-
-            if not message:
-                continue
-            if isinstance(message, bytes):
-                continue
-            try:
-                payload = json.loads(message)
-            except Exception:
-                continue
-            LOGGER.info(
-                "WS message received event=%s received_chunks=%s buffer_seconds=%s detail=%s",
-                payload.get('event'),
-                payload.get('received_chunks'),
-                payload.get('buffer_seconds'),
-                payload.get('detail'),
-            )
-            inference_state.on_server_message(payload)
+        self._failure_count = 0
+        inference_state.on_reconnect_scheduled(0.0, 'Manual retry requested. Retrying REST inference now.')
+        self._probe_service('Manual retry requested.')
+        if self._replay_chunks_provider is not None:
+            replay_chunks = self._replay_chunks_provider()
+            if replay_chunks:
+                self._post_snapshot(replay_chunks[-1], event_name='partial_result')
 
     def send_chunk(self, pcm_bytes, replay_chunks_provider=None):
-        if self._inference_disabled:
-            return False
-        ws = self._ws
-        if ws is None:
-            self._ensure_reconnect_loop(
-                'Inference service is unavailable.',
-                replay_chunks_provider=replay_chunks_provider,
-            )
-            return False
-        try:
-            LOGGER.info(
-                "WS send latest snapshot bytes=%s approx_seconds=%.3f",
-                len(pcm_bytes),
-                len(pcm_bytes) / (self.sample_rate * self.channels * 2) if self.sample_rate and self.channels else 0.0,
-            )
-            ws.send_binary(pcm_bytes)
-            payload_seconds = 0.0
-            if self.sample_rate and self.channels:
-                payload_seconds = len(pcm_bytes) / (self.sample_rate * self.channels * 2)
-            inference_state.on_payload_sent(payload_seconds)
-            return True
-        except Exception as exc:
-            LOGGER.exception("WS send failed")
-            inference_state.on_transport_lost(f'WebSocket send failed: {exc}')
-            self._clear_connection()
-            self._ensure_reconnect_loop(
-                'Send path lost websocket transport.',
-                replay_chunks_provider=replay_chunks_provider,
-            )
-            return False
+        return self._post_snapshot(
+            pcm_bytes,
+            event_name='partial_result',
+            replay_chunks_provider=replay_chunks_provider,
+        )
 
     def finalize(self, replay_chunks_provider=None):
-        if self._ws is None:
+        if self._replay_chunks_provider is not None and replay_chunks_provider is None:
+            replay_chunks_provider = self._replay_chunks_provider
+        payload = b''
+        if replay_chunks_provider is not None:
+            replay_chunks = replay_chunks_provider()
+            if replay_chunks:
+                payload = replay_chunks[-1]
+        if not payload:
             return
-        try:
-            LOGGER.info("WS finalize requested")
-            self._ws.send(json.dumps({'type': 'stop'}))
-            deadline = time.time() + 2.0
-            while time.time() < deadline:
-                snap = inference_state.snapshot()
-                if snap.get('last_final') or snap.get('last_error'):
-                    break
-                time.sleep(0.05)
-        except Exception as exc:
-            LOGGER.exception("WS finalize failed")
-            inference_state.on_error(exc)
+        self._post_snapshot(payload, event_name='final_result', replay_chunks_provider=replay_chunks_provider)
 
     def close(self):
-        self._recv_stop.set()
-        self._retry_wakeup.set()
-        ws = self._ws
-        self._ws = None
-        if ws is not None:
-            try:
-                ws.close()
-            except Exception:
-                pass
-        if self._recv_thread is not None:
-            self._recv_thread.join(timeout=1.0)
-        if self._reconnect_thread is not None:
-            self._reconnect_thread.join(timeout=1.0)
-        LOGGER.info("WS client closed")
+        try:
+            self._session.close()
+        except Exception:
+            pass
+        LOGGER.info("REST client closed api_url=%s", self.api_url)
         inference_state.on_closed()
 
 
@@ -792,17 +897,29 @@ class _CaptureManager:
             rolling_buffer.configure(sample_rate=sample_rate, channels=channels)
             rolling_buffer.clear()
             audio_backend.on_capture_started(sample_rate, channels)
-            inference_client = _StreamingInferenceClient(INFERENCE_WS_URL, INFERENCE_MODE, EMIT_INTERVAL_SEC)
+            inference_client = _StreamingInferenceClient(INFERENCE_API_URL, INFERENCE_MODE, EMIT_INTERVAL_SEC)
             inference_client.connect(
-                sample_rate=TARGET_SAMPLE_RATE,
-                channels=TARGET_CHANNELS,
+                sample_rate=INFERENCE_SAMPLE_RATE,
+                channels=INFERENCE_CHANNELS,
                 frames_per_buffer=FRAMES_PER_BUFFER,
             )
             with self._lock:
                 self._inference_client = inference_client
 
             while not stop_event.is_set():
-                data = stream.read(FRAMES_PER_BUFFER, exception_on_overflow=False)
+                try:
+                    data = stream.read(FRAMES_PER_BUFFER, exception_on_overflow=False)
+                except OSError as exc:
+                    if stop_event.is_set():
+                        LOGGER.warning("Capture stream read interrupted during shutdown: %s", exc)
+                    else:
+                        LOGGER.warning("Capture stream read warning; closing capture loop gracefully: %s", exc)
+                    break
+                except Exception:
+                    if stop_event.is_set():
+                        LOGGER.warning("Capture stream read interrupted during shutdown", exc_info=True)
+                        break
+                    raise
                 rolling_buffer.push(data)
                 audio_backend.on_chunk(data, sample_rate, channels)
                 if pending_started_at is None:
@@ -810,19 +927,27 @@ class _CaptureManager:
 
                 should_flush = (time.monotonic() - pending_started_at) >= SEND_INTERVAL_SEC
                 if should_flush:
-                    # Upload the latest model-sized window in reduced 22050 Hz
-                    # mono PCM16 format.
-                    payload = _latest_inference_snapshot_pcm()
-                    if payload:
+                    buffered_seconds = rolling_buffer.buffered_seconds()
+                    if buffered_seconds >= MIN_INFERENCE_SECONDS:
+                        # Upload the latest model-sized window in reduced 22050 Hz
+                        # mono PCM16 format.
+                        payload = _latest_inference_snapshot_pcm()
+                        if payload:
+                            LOGGER.info(
+                                "Capture flush buffered_seconds=%.3f send_interval_sec=%.3f snapshot_bytes=%s",
+                                buffered_seconds,
+                                SEND_INTERVAL_SEC,
+                                len(payload),
+                            )
+                            inference_client.send_chunk(
+                                payload,
+                                replay_chunks_provider=_latest_inference_replay_chunks,
+                            )
+                    else:
                         LOGGER.info(
-                            "Capture flush buffered_seconds=%.3f send_interval_sec=%.3f snapshot_bytes=%s",
-                            rolling_buffer.buffered_seconds(),
-                            SEND_INTERVAL_SEC,
-                            len(payload),
-                        )
-                        inference_client.send_chunk(
-                            payload,
-                            replay_chunks_provider=_latest_inference_replay_chunks,
+                            "Capture flush skipped buffered_seconds=%.3f minimum_required=%.3f",
+                            buffered_seconds,
+                            MIN_INFERENCE_SECONDS,
                         )
                     pending_started_at = None
 
@@ -862,11 +987,25 @@ class _CaptureManager:
                     inference_client.close()
             with self._lock:
                 self._inference_client = None
+                if self._thread is threading.current_thread():
+                    self._thread = None
+                    self._stop_event = None
+                    self._is_capturing = False
             audio_backend.on_capture_stopped()
             try:
                 if stream is not None:
-                    stream.stop_stream()
-                    stream.close()
+                    try:
+                        stream.stop_stream()
+                    except OSError as exc:
+                        LOGGER.warning("Capture stream stop warning: %s", exc)
+                    except Exception:
+                        LOGGER.warning("Capture stream stop warning", exc_info=True)
+                    try:
+                        stream.close()
+                    except OSError as exc:
+                        LOGGER.warning("Capture stream close warning: %s", exc)
+                    except Exception:
+                        LOGGER.warning("Capture stream close warning", exc_info=True)
             finally:
                 p.terminate()
             LOGGER.info("Capture stream closed")
@@ -909,19 +1048,16 @@ def _open_wasapi_loopback_stream(p):
 
     candidate_channels = _unique_positive_ints(
         [
-            1,
-            2,
-            loopback_device.get("maxInputChannels"),
+            *PREFERRED_CAPTURE_CHANNELS,
             default_speakers.get("maxOutputChannels"),
+            loopback_device.get("maxInputChannels"),
         ]
     )
     candidate_rates = _unique_positive_ints(
         [
-            TARGET_SAMPLE_RATE,
             loopback_device.get("defaultSampleRate"),
             default_speakers.get("defaultSampleRate"),
-            48000,
-            44100,
+            *PREFERRED_CAPTURE_SAMPLE_RATES,
         ]
     )
 
@@ -1082,15 +1218,22 @@ def inference_retry():
         return _json_response(payload, status=400)
     return _json_response(payload)
 
+
+@app.route('/demo-assets/<path:filename>')
+def demo_assets(filename):
+    return send_from_directory(DEMO_APP_IMAGES_DIR, filename)
+
 @app.route('/')
 def index():
-    # Minimal UI: user starts/stops capture; playback plays the last 18 seconds captured.
+    # Minimal UI: user starts/stops capture; playback plays the latest captured clip.
+    falling_asset_sets = _build_falling_asset_sets()
     return render_template_string('''
         <html>
             <head>
                 <meta charset="utf-8" />
                 <meta name="viewport" content="width=device-width, initial-scale=1" />
                 <title>Music Genre Prediction</title>
+                <link rel="icon" type="image/png" href="{{ app_icon_url }}" />
                 <style>
                     :root {
                         --bg: #181b1f;
@@ -1123,6 +1266,23 @@ def index():
                         color: var(--text);
                         font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
                         line-height: 1.4;
+                    }
+
+                    body::before {
+                        content: "";
+                        position: fixed;
+                        top: -24px;
+                        left: 0;
+                        right: 0;
+                        height: min(34vh, 300px);
+                        background: linear-gradient(rgba(24, 27, 31, 0.10), rgba(24, 27, 31, 0.52)),
+                                    url("{{ hero_bg_url }}") no-repeat center top / cover;
+                        filter: blur(10px);
+                        opacity: 0.5;
+                        transform: scale(1.03);
+                        transform-origin: top center;
+                        pointer-events: none;
+                        z-index: 0;
                     }
 
                     .leaf-stage {
@@ -1192,19 +1352,21 @@ def index():
                     }
 
                     .leaf-set div:nth-child(6) {
-                        left: 20%;
-                        animation: leaf-fall 15s linear infinite;
-                        animation-delay: -7s;
+                        left: 32%;
+                        animation: leaf-fall 17s linear infinite;
+                        animation-delay: -12s;
                     }
 
                     .leaf-set div:nth-child(7) {
-                        left: 0%;
-                        animation: leaf-fall 12s linear infinite;
+                        left: 12%;
+                        animation: leaf-fall 13s linear infinite;
+                        animation-delay: -3s;
                     }
 
                     .leaf-set div:nth-child(8) {
-                        left: 60%;
-                        animation: leaf-fall 15s linear infinite;
+                        left: 64%;
+                        animation: leaf-fall 16s linear infinite;
+                        animation-delay: -9s;
                     }
 
                     .leaf-set.alt-a {
@@ -1254,17 +1416,38 @@ def index():
                     .wrap {
                         position: relative;
                         z-index: 1;
-                        max-width: 760px;
+                        max-width: 860px;
                         margin: 0 auto;
-                        padding: 40px 16px;
+                        padding: 16px 16px;
                     }
 
                     .card {
+                        position: relative;
+                        overflow: hidden;
                         background: linear-gradient(180deg, rgba(40, 44, 51, 0.96), rgba(40, 42, 46, 0.97));
                         border: 1px solid var(--border);
                         border-radius: 9px;
                         padding: 20px 18px;
                         box-shadow: 0 18px 40px rgba(0, 0, 0, 0.24), inset 0 1px 0 rgba(255, 255, 255, 0.03);
+                    }
+
+                    .card::before {
+                        content: "";
+                        position: absolute;
+                        inset: 0;
+                        background: linear-gradient(rgba(24, 27, 31, 0.88), rgba(24, 27, 31, 0.88)),
+                                    url("{{ hero_bg_url }}") no-repeat center center / cover;
+                        filter: blur(10px);
+                        opacity: 0.5;
+                        transform: scale(1.06);
+                        transform-origin: center center;
+                        pointer-events: none;
+                        z-index: 0;
+                    }
+
+                    .card > * {
+                        position: relative;
+                        z-index: 1;
                     }
 
                     h2 {
@@ -1283,6 +1466,58 @@ def index():
                         position: relative;
                         overflow: hidden;
                         background: linear-gradient(135deg, rgba(93, 132, 182, 0.18), rgba(245, 143, 115, 0.12) 42%, rgba(143, 216, 139, 0.10));
+                    }
+
+                    .hero-card::before {
+                        background: linear-gradient(rgba(24, 27, 31, 0.82), rgba(24, 27, 31, 0.82)),
+                                    url("{{ hero_bg_url }}") no-repeat center center / cover;
+                        opacity: 0.42;
+                    }
+
+                    .hero-card > .hero-card-overlay {
+                        position: absolute;
+                        inset: 0;
+                        background: url("{{ hero_bg_url }}") no-repeat center center / cover;
+                        opacity: 0.20;
+                        pointer-events: none;
+                        z-index: 0;
+                    }
+
+                    .hero-card-grid {
+                        display: grid;
+                        grid-template-columns: minmax(0, 1fr) auto;
+                        gap: 18px;
+                        align-items: center;
+                        text-align: left;
+                    }
+
+                    .hero-card-copy {
+                        min-width: 0;
+                    }
+
+                    .hero-card-logo-column {
+                        display: flex;
+                        justify-content: flex-end;
+                        align-items: center;
+                    }
+
+                    .hero-logo {
+                        width: min(88px, 20.8vw);
+                        height: auto;
+                        display: block;
+                        margin: 0;
+                    }
+
+                    @media (max-width: 640px) {
+                        .hero-card-grid {
+                            grid-template-columns: 1fr;
+                            text-align: center;
+                        }
+
+                        .hero-card-logo-column {
+                            justify-content: center;
+                            order: -1;
+                        }
                     }
 
                     .hero-card::after {
@@ -1427,59 +1662,115 @@ def index():
                         text-align: left;
                     }
 
+                    .prediction-fade-body {
+                        transition: opacity 240ms ease;
+                        opacity: 1;
+                    }
+
                     .mono {
                         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
                         font-size: 12px;
+                    }
+
+                    .notes-list {
+                        margin: 0;
+                        padding: 0;
+                        list-style: none;
+                        display: grid;
+                        gap: 8px;
+                    }
+
+                    .notes-item {
+                        padding: 10px 12px;
+                        border-radius: 10px;
+                        border: 1px solid rgba(130, 215, 221, 0.18);
+                        background: linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.02));
+                    }
+
+                    .notes-item strong {
+                        display: inline-block;
+                        margin-right: 8px;
+                    }
+
+                    .notes-meta {
+                        color: var(--muted);
+                        margin-top: 4px;
+                    }
+
+                    .trend-canvas {
+                        width: 100%;
+                        height: 260px;
+                        display: block;
+                        border-radius: 12px;
+                        border: 1px solid rgba(130, 215, 221, 0.16);
+                        background: linear-gradient(180deg, rgba(13, 20, 30, 0.9), rgba(18, 28, 40, 0.92));
+                    }
+
+                    .trend-legend {
+                        display: flex;
+                        flex-wrap: wrap;
+                        gap: 8px;
+                        margin-top: 12px;
+                    }
+
+                    .trend-chip {
+                        display: inline-flex;
+                        align-items: center;
+                        gap: 6px;
+                        padding: 4px 8px;
+                        border-radius: 999px;
+                        border: 1px solid rgba(255, 255, 255, 0.08);
+                        background: rgba(255, 255, 255, 0.04);
+                        color: var(--text);
+                        font-size: 11px;
+                    }
+
+                    .trend-chip-swatch {
+                        width: 10px;
+                        height: 10px;
+                        border-radius: 999px;
+                        display: inline-block;
                     }
                 </style>
             </head>
             <body style="font-family: sans-serif; text-align: center; margin-top: 0px;">
                 <div class="leaf-stage" aria-hidden="true">
                     <div class="leaf-set">
-                        <div><img src="https://i.ibb.co/M59443B/leaves1.png" alt="" /></div>
-                        <div><img src="https://i.ibb.co/v1WGv6b/leaves2.png" alt="" /></div>
-                        <div><img src="https://i.ibb.co/V3KSBdV/leaves3.png" alt="" /></div>
-                        <div><img src="https://i.ibb.co/jkGMYLM/leaves4.png" alt="" /></div>
-                        <div><img src="https://i.ibb.co/M59443B/leaves1.png" alt="" /></div>
-                        <div><img src="https://i.ibb.co/v1WGv6b/leaves2.png" alt="" /></div>
-                        <div><img src="https://i.ibb.co/V3KSBdV/leaves3.png" alt="" /></div>
-                        <div><img src="https://i.ibb.co/jkGMYLM/leaves4.png" alt="" /></div>
+                        {% for asset_url in falling_asset_sets[0] %}
+                        <div><img src="{{ asset_url }}" alt="" /></div>
+                        {% endfor %}
                     </div>
                     <div class="leaf-set alt-a">
-                        <div><img src="https://i.ibb.co/M59443B/leaves1.png" alt="" /></div>
-                        <div><img src="https://i.ibb.co/v1WGv6b/leaves2.png" alt="" /></div>
-                        <div><img src="https://i.ibb.co/V3KSBdV/leaves3.png" alt="" /></div>
-                        <div><img src="https://i.ibb.co/jkGMYLM/leaves4.png" alt="" /></div>
-                        <div><img src="https://i.ibb.co/M59443B/leaves1.png" alt="" /></div>
-                        <div><img src="https://i.ibb.co/v1WGv6b/leaves2.png" alt="" /></div>
-                        <div><img src="https://i.ibb.co/V3KSBdV/leaves3.png" alt="" /></div>
-                        <div><img src="https://i.ibb.co/jkGMYLM/leaves4.png" alt="" /></div>
+                        {% for asset_url in falling_asset_sets[1] %}
+                        <div><img src="{{ asset_url }}" alt="" /></div>
+                        {% endfor %}
                     </div>
                     <div class="leaf-set alt-b">
-                        <div><img src="https://i.ibb.co/M59443B/leaves1.png" alt="" /></div>
-                        <div><img src="https://i.ibb.co/v1WGv6b/leaves2.png" alt="" /></div>
-                        <div><img src="https://i.ibb.co/V3KSBdV/leaves3.png" alt="" /></div>
-                        <div><img src="https://i.ibb.co/jkGMYLM/leaves4.png" alt="" /></div>
-                        <div><img src="https://i.ibb.co/M59443B/leaves1.png" alt="" /></div>
-                        <div><img src="https://i.ibb.co/v1WGv6b/leaves2.png" alt="" /></div>
-                        <div><img src="https://i.ibb.co/V3KSBdV/leaves3.png" alt="" /></div>
-                        <div><img src="https://i.ibb.co/jkGMYLM/leaves4.png" alt="" /></div>
+                        {% for asset_url in falling_asset_sets[2] %}
+                        <div><img src="{{ asset_url }}" alt="" /></div>
+                        {% endfor %}
                     </div>
                 </div>
                 <div class="wrap">
-                    <div class="card hero-card" style="margin-bottom: 18px; text-align: center;">
-                        <div style="font-size: 15px; font-weight: 700; letter-spacing: 0.1px;">🎧𝄞💿✮˚.⋆ Machine Learning 1 – Final Project: Music Genre Prediction ♬⋆.˚</div>
-                        <div style="color: var(--muted); font-size: 13px; margin-top: 4px;">By Nguyen Sy Hung, 2026</div>
+                    <div class="card hero-card" style="margin-bottom: 16px; text-align: center;">
+                        <div class="hero-card-overlay" aria-hidden="true"></div>
+                        <div class="hero-card-grid">
+                            <div class="hero-card-copy">
+                                <div style="font-size: 18px; font-weight: 700; letter-spacing: 0.1px;">🎧𝄞✮˚.⋆ Final Project: Music Genre Prediction using Lol-Mel & CNN ♬⋆.˚</div>
+                                <div style="color: var(--muted); font-size: 16px; margin-top: 4px;"><strong>By Nguyen Sy Hung, 2026</strong></div>
+                                <div style="color: var(--muted); font-size: 16px; margin-top: 4px;"><strong>Machine Learning 1, MLE501.22, FSB | Lecturer: PhD. Truc Thi Kim, Nguyen</strong></div>
+                            </div>
+                            <div class="hero-card-logo-column">
+                                <img class="hero-logo" src="{{ hero_logo_url }}" alt="Music Genre Prediction logo" />
+                            </div>
+                        </div>
                     </div>
                     <div class="card">
-                        <h2>System Audio Capture + Streaming Inference</h2>
-                        <p class="sub">Capture system audio via WASAPI loopback, stream raw PCM16 little-endian chunks over WebSocket, and show live genre predictions from the inference web service.</p>
-
                         <div class="row">
                             <button id="captureBtn">Capture</button>
                             <button id="retryBtn">Retry Inference</button>
                             <span class="badge" id="statusBadge">Idle</span>
-                            <span class="badge" id="wsBadge">WS Disconnected</span>
+                            <span class="badge" id="wsBadge">API Idle</span>
                         </div>
 
                         <div class="row" style="margin-top: 16px;">
@@ -1496,6 +1787,30 @@ def index():
                             </div>
                         </div>
 
+                        <div class="result-box">
+                            <div class="label"><strong>Latest Partial Prediction</strong></div>
+                            <div class="prediction-fade-body" id="partialPredictionBody">
+                                <div class="value" id="partialPrediction">Waiting for inference...</div>
+                                <div class="mono" id="partialTopK"></div>
+                                <div class="mono" id="partialTimestamp">---</div>
+                            </div>
+                        </div>
+
+                        <!--
+                        <div class="result-box">
+                            <div class="label">Latest Final Prediction</div>
+                            <div class="value" id="finalPrediction">---</div>
+                            <div class="mono" id="finalTopK"></div>
+                            <div class="mono" id="finalTimestamp">---</div>
+                        </div> -->
+
+                        <div class="result-box">
+                            <div class="label">Genre Trend (180 Seconds)</div>
+                            <canvas id="trendCanvas" class="trend-canvas"></canvas>
+                            <div class="trend-legend mono" id="trendLegend">Waiting for trend data...</div>
+                        </div>
+
+
                         <div class="grid">
                             <div class="stat">
                                 <div class="label">Inference Mode</div>
@@ -1506,7 +1821,7 @@ def index():
                                 <div class="value" id="streamFormat">---</div>
                             </div>
                             <div class="stat">
-                                <div class="label">Received Chunks</div>
+                                <div class="label">Inference Requests</div>
                                 <div class="value" id="receivedChunks">0</div>
                             </div>
                             <div class="stat">
@@ -1517,32 +1832,27 @@ def index():
                                 <div class="label">Send Interval</div>
                                 <div class="value" id="sendInterval">---</div>
                             </div>
-                            <div class="stat">
+                            <!--<div class="stat">
                                 <div class="label">Reconnects</div>
                                 <div class="value" id="reconnectCount">0</div>
-                            </div>
+                            </div>-->
                             <div class="stat">
                                 <div class="label">Sent Payloads</div>
                                 <div class="value" id="sentPayloads">0</div>
                             </div>
                         </div>
 
-                        <div class="result-box">
-                            <div class="label">Latest Partial Prediction</div>
-                            <div class="value" id="partialPrediction">Waiting for stream...</div>
-                            <div class="mono" id="partialTopK"></div>
-                        </div>
-
-                        <div class="result-box">
-                            <div class="label">Latest Final Prediction</div>
-                            <div class="value" id="finalPrediction">---</div>
-                            <div class="mono" id="finalTopK"></div>
-                        </div>
 
                         <div class="result-box">
                             <div class="label">Service / Error Status</div>
                             <div class="mono" id="serviceStatus">No messages yet.</div>
                         </div>
+
+                        <div class="result-box">
+                            <div class="label">Recent Genre Notes</div>
+                            <div class="mono" id="genreNotes">No genre notes yet.</div>
+                        </div>
+
                     </div>
                 </div>
 
@@ -1562,29 +1872,189 @@ def index():
                                     const reconnectCount = document.getElementById('reconnectCount');
                                     const sentPayloads = document.getElementById('sentPayloads');
                                     const partialPrediction = document.getElementById('partialPrediction');
+                                    const partialPredictionBody = document.getElementById('partialPredictionBody');
                                     const partialTopK = document.getElementById('partialTopK');
+                                    const partialTimestamp = document.getElementById('partialTimestamp');
                                     const finalPrediction = document.getElementById('finalPrediction');
                                     const finalTopK = document.getElementById('finalTopK');
+                                    const finalTimestamp = document.getElementById('finalTimestamp');
                                     const serviceStatus = document.getElementById('serviceStatus');
+                                    const genreNotes = document.getElementById('genreNotes');
+                                    const trendCanvas = document.getElementById('trendCanvas');
+                                    const trendLegend = document.getElementById('trendLegend');
                                     let capturing = false;
                                     let levelPoll = null;
                                     let inferencePoll = null;
                                     let analyserLoopRunning = false;
                                     let levelSmoothed = 0;
                                     let meterMode = 'idle'; // 'capture' | 'playback' | 'idle'
+                                    let partialPredictionUpdatedAtMs = null;
+                                    let partialPredictionFadeTimer = null;
+                                    const PARTIAL_PREDICTION_FULL_BRIGHTNESS_MS = 30 * 1000;
+                                    const PARTIAL_PREDICTION_FADE_SPAN_MS = 30 * 1000;
+                                    const PARTIAL_PREDICTION_MIN_OPACITY = 0.8;
+                                    const trendPalette = ['#82D7DD', '#F58F73', '#8FD88B', '#EEA0B8', '#DDB85B', '#5D84B6', '#E8D6C8', '#4FA7A2', '#F4F0F2', '#C6E48B'];
+
+                                    function parseTimestampMs(value) {
+                                        if (!value) return null;
+                                        const parsed = Date.parse(value);
+                                        return Number.isFinite(parsed) ? parsed : null;
+                                    }
+
+                                    function computePartialPredictionOpacity(nowMs) {
+                                        if (!partialPredictionUpdatedAtMs) return 1;
+                                        const ageMs = Math.max(0, nowMs - partialPredictionUpdatedAtMs);
+                                        if (ageMs <= PARTIAL_PREDICTION_FULL_BRIGHTNESS_MS) return 1;
+                                        const fadeAgeMs = ageMs - PARTIAL_PREDICTION_FULL_BRIGHTNESS_MS;
+                                        const fadeRatio = Math.min(1, fadeAgeMs / PARTIAL_PREDICTION_FADE_SPAN_MS);
+                                        return 1 - (1 - PARTIAL_PREDICTION_MIN_OPACITY) * fadeRatio;
+                                    }
+
+                                    function applyPartialPredictionFade() {
+                                        if (!partialPredictionBody) return;
+                                        const opacity = computePartialPredictionOpacity(Date.now());
+                                        partialPredictionBody.style.opacity = opacity.toFixed(3);
+                                    }
+
+                                    function ensurePartialPredictionFadeTimer() {
+                                        if (partialPredictionFadeTimer) return;
+                                        partialPredictionFadeTimer = setInterval(applyPartialPredictionFade, 1000);
+                                    }
 
                                     function formatTopK(items) {
                                         if (!items || !items.length) return '---';
                                         return items.map(item => `${item.genre} (${(item.probability * 100).toFixed(1)}%)`).join(' | ');
                                     }
 
+                                    function renderGenreNotesMap(notesMap) {
+                                        if (!notesMap || !Object.keys(notesMap).length) {
+                                            genreNotes.textContent = 'No genre notes yet.';
+                                            return;
+                                        }
+
+                                        const entries = Object.entries(notesMap)
+                                            .flatMap(([genre, notes]) => {
+                                                if (!Array.isArray(notes)) return [];
+                                                return notes.map(note => ({ ...note, genre: note.genre || genre }));
+                                            })
+                                            .sort((a, b) => String(b.timestamp || '').localeCompare(String(a.timestamp || '')))
+                                            .slice(0, 10)
+                                            .map(note => {
+                                                const confidence = Number(note.confidence || 0);
+                                                const chunks = note.received_chunks ?? '-';
+                                                const bufferSeconds = Number(note.buffer_seconds || 0).toFixed(2);
+                                                return `
+                                                    <li class="notes-item">
+                                                        <strong>${note.genre || '---'}</strong>
+                                                        <span>${note.event || 'result'} • ${(confidence * 100).toFixed(1)}%</span>
+                                                        <div class="notes-meta">${note.timestamp || '---'} | requests ${chunks} | buffer ${bufferSeconds}s</div>
+                                                    </li>
+                                                `;
+                                            })
+                                            .join('');
+
+                                        genreNotes.innerHTML = `<ul class="notes-list">${entries}</ul>`;
+                                    }
+
+                                    function getTrendColor(index) {
+                                        return trendPalette[index % trendPalette.length];
+                                    }
+
+                                    function renderTrendPlot(history, trendWindowSeconds = 180) {
+                                        if (!trendCanvas) return;
+
+                                        const rect = trendCanvas.getBoundingClientRect();
+                                        const width = Math.max(320, Math.floor(rect.width || 640));
+                                        const height = Math.max(220, Math.floor(rect.height || 260));
+                                        const dpr = window.devicePixelRatio || 1;
+                                        trendCanvas.width = Math.floor(width * dpr);
+                                        trendCanvas.height = Math.floor(height * dpr);
+
+                                        const ctx = trendCanvas.getContext('2d');
+                                        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+                                        ctx.clearRect(0, 0, width, height);
+
+                                        const padding = { top: 16, right: 18, bottom: 26, left: 36 };
+                                        const plotWidth = width - padding.left - padding.right;
+                                        const plotHeight = height - padding.top - padding.bottom;
+                                        const nowSec = Date.now() / 1000;
+                                        const points = Array.isArray(history) ? history.filter(point => Array.isArray(point.probs) && Array.isArray(point.genre_classes)) : [];
+
+                                        ctx.fillStyle = 'rgba(244, 240, 242, 0.75)';
+                                        ctx.font = '11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+
+                                        if (!points.length) {
+                                            ctx.fillText('Waiting for trend data...', padding.left, padding.top + 20);
+                                            trendLegend.textContent = 'Waiting for trend data...';
+                                            return;
+                                        }
+
+                                        const latestPoint = points[points.length - 1];
+                                        const genreClasses = Array.isArray(latestPoint.genre_classes) ? latestPoint.genre_classes : [];
+                                        const seriesMap = new Map(genreClasses.map((genre, idx) => [genre, { color: getTrendColor(idx), points: [] }]));
+
+                                        for (const point of points) {
+                                            const ts = Number(point.ts_epoch || 0);
+                                            const ageSec = nowSec - ts;
+                                            if (ageSec < 0 || ageSec > trendWindowSeconds) continue;
+                                            for (let idx = 0; idx < genreClasses.length; idx++) {
+                                                const genre = genreClasses[idx];
+                                                const series = seriesMap.get(genre);
+                                                if (!series) continue;
+                                                const probability = Number(point.probs[idx] || 0);
+                                                series.points.push({ ageSec, probability });
+                                            }
+                                        }
+
+                                        ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
+                                        ctx.lineWidth = 1;
+                                        for (let gridIdx = 0; gridIdx <= 4; gridIdx++) {
+                                            const y = padding.top + (plotHeight * gridIdx) / 4;
+                                            ctx.beginPath();
+                                            ctx.moveTo(padding.left, y);
+                                            ctx.lineTo(width - padding.right, y);
+                                            ctx.stroke();
+                                            const label = `${(1 - gridIdx / 4).toFixed(2)}`;
+                                            ctx.fillText(label, 4, y + 4);
+                                        }
+                                        for (let gridIdx = 0; gridIdx <= 6; gridIdx++) {
+                                            const x = padding.left + (plotWidth * gridIdx) / 6;
+                                            ctx.beginPath();
+                                            ctx.moveTo(x, padding.top);
+                                            ctx.lineTo(x, height - padding.bottom);
+                                            ctx.stroke();
+                                            const secondsAgo = Math.round(trendWindowSeconds - (trendWindowSeconds * gridIdx) / 6);
+                                            ctx.fillText(`-${secondsAgo}s`, x - 12, height - 8);
+                                        }
+
+                                        for (const [genre, series] of seriesMap.entries()) {
+                                            if (!series.points.length) continue;
+                                            const sortedPoints = series.points.slice().sort((a, b) => b.ageSec - a.ageSec);
+                                            ctx.strokeStyle = series.color;
+                                            ctx.lineWidth = 2;
+                                            ctx.beginPath();
+                                            sortedPoints.forEach((point, idx) => {
+                                                const x = padding.left + ((trendWindowSeconds - point.ageSec) / trendWindowSeconds) * plotWidth;
+                                                const y = padding.top + (1 - point.probability) * plotHeight;
+                                                if (idx === 0) ctx.moveTo(x, y);
+                                                else ctx.lineTo(x, y);
+                                            });
+                                            ctx.stroke();
+                                        }
+
+                                        const legendHtml = Array.from(seriesMap.entries())
+                                            .map(([genre, series]) => `<span class="trend-chip"><span class="trend-chip-swatch" style="background:${series.color}"></span>${genre}</span>`)
+                                            .join('');
+                                        trendLegend.innerHTML = legendHtml || 'Waiting for trend data...';
+                                    }
+
                                     function updateInferenceUI(data) {
-                                        wsBadge.textContent = data.connected ? 'WS Connected' : 'WS Disconnected';
+                                        wsBadge.textContent = data.connected ? 'API Ready' : 'API Unreachable';
                                         if (data.reconnecting) {
-                                            wsBadge.textContent = `WS Reconnecting (${data.reconnect_attempt || 0})`;
+                                            wsBadge.textContent = `API Retry (${data.reconnect_attempt || 0})`;
                                         }
                                         if (data.inference_disabled) {
-                                            wsBadge.textContent = 'Inference Disabled';
+                                            wsBadge.textContent = 'API Disabled';
                                         }
                                         inferenceMode.textContent = data.mode || '---';
                                         const sr = data.sample_rate || '---';
@@ -1603,12 +2073,17 @@ def index():
                                             const warmup = partial.is_warmup ? ' [warmup]' : '';
                                             partialPrediction.textContent = `${partial.genre} (${(partial.confidence * 100).toFixed(1)}%)${warmup}`;
                                             partialTopK.textContent = formatTopK(partial.top_k);
+                                            partialTimestamp.textContent = `Timestamp: ${partial.timestamp || '---'}`;
+                                            partialPredictionUpdatedAtMs = parseTimestampMs(partial.timestamp) || Date.now();
+                                            applyPartialPredictionFade();
+                                            ensurePartialPredictionFadeTimer();
                                         }
 
                                         const final = data.last_final;
                                         if (final) {
                                             finalPrediction.textContent = `${final.genre} (${(final.confidence * 100).toFixed(1)}%)`;
                                             finalTopK.textContent = formatTopK(final.top_k);
+                                            finalTimestamp.textContent = `Timestamp: ${final.timestamp || '---'}`;
                                         }
 
                                         if (data.last_error) {
@@ -1617,8 +2092,11 @@ def index():
                                             const backoff = data.last_backoff_seconds ? ` | backoff ${Number(data.last_backoff_seconds).toFixed(2)}s` : '';
                                             serviceStatus.textContent = `Last event: ${data.last_server_event}` + (data.last_detail ? ` | ${data.last_detail}` : '') + backoff;
                                         } else {
-                                            serviceStatus.textContent = 'Waiting for websocket events.';
+                                            serviceStatus.textContent = 'Waiting for inference events.';
                                         }
+
+                                        renderGenreNotesMap(data.genre_result_notes || {});
+                                        renderTrendPlot(data.prediction_trend_history || [], Number(data.trend_window_seconds || 180));
                                     }
 
                                     function resetMeter() {
@@ -1829,11 +2307,13 @@ def index():
 
                                     // Initial state: not capturing; playback enabled.
                                     setCapturingUI(false);
+                                    applyPartialPredictionFade();
+                                    ensurePartialPredictionFadeTimer();
                                     startInferencePolling();
                 </script>
             </body>
         </html>
-    ''')
+    ''', app_icon_url=_demo_asset_url('app_icon.png'), hero_logo_url=_demo_asset_url('headphone1.png'), hero_bg_url=_demo_asset_url('hero_background.png'), falling_asset_sets=falling_asset_sets)
 
 if __name__ == "__main__":
     # Threaded=True is required so the web server can serve the UI and the stream simultaneously

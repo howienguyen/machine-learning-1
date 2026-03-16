@@ -36,6 +36,8 @@ import logging
 import os
 import sys
 import tempfile
+import time
+import wave
 from pathlib import Path
 from typing import Any
 
@@ -60,11 +62,14 @@ from model_inference.inference_logmel_cnn_v2_x import (
 
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8000
-DEFAULT_MODEL_DIR = (MELCNN_DIR / "demo-models" / "logmel-cnn-v2_1-20260313-081401").resolve()
+DEFAULT_MODEL_DIR = (MELCNN_DIR / "demo-models" / "logmel-cnn-v2_2-20260314-054310").resolve()
 STREAM_PATH = "/ws/stream"
 LOGGER = logging.getLogger("melcnn.inference_web_service")
 DEFAULT_WS_PING_INTERVAL = 20.0
 DEFAULT_WS_PING_TIMEOUT = 20.0
+TMP_AUDIO_DIR = (MELCNN_DIR / "data" / "tmp_inference").resolve()
+MAX_SAVED_AUDIO_CLIPS = 10
+SAVE_LATEST_AUDIO_CLIPS = True
 
 
 def _ws_payload_summary(payload: dict[str, Any]) -> str:
@@ -109,6 +114,45 @@ def _ensure_websocket_backend_available() -> None:
         "WebSocket support requires an ASGI WebSocket backend. "
         "Install one of: 'websockets', 'wsproto', or 'uvicorn[standard]'."
     )
+
+
+def _sanitize_filename_component(value: str) -> str:
+    cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in value)
+    cleaned = cleaned.strip("._")
+    return cleaned or "clip"
+
+
+def _trim_saved_audio_clips(directory: Path, keep_latest: int) -> None:
+    wav_files = sorted(directory.glob("*.wav"), key=lambda path: path.stat().st_mtime, reverse=True)
+    for stale_path in wav_files[keep_latest:]:
+        stale_path.unlink(missing_ok=True)
+
+
+def _save_waveform_clip(waveform: np.ndarray, sample_rate: int, source_tag: str) -> Path | None:
+    if not SAVE_LATEST_AUDIO_CLIPS:
+        return None
+    TMP_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    millis = int((time.time() % 1) * 1000)
+    clip_name = f"{timestamp}-{millis:03d}-{_sanitize_filename_component(source_tag)}.wav"
+    clip_path = TMP_AUDIO_DIR / clip_name
+
+    pcm16 = np.clip(np.asarray(waveform, dtype=np.float32), -1.0, 1.0)
+    pcm16 = (pcm16 * 32767.0).astype("<i2")
+    with wave.open(str(clip_path), "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(int(sample_rate))
+        wav_file.writeframes(pcm16.tobytes())
+
+    _trim_saved_audio_clips(TMP_AUDIO_DIR, MAX_SAVED_AUDIO_CLIPS)
+    LOGGER.info("Saved audio clip path=%s sample_rate=%s seconds=%.3f", clip_path, sample_rate, len(pcm16) / sample_rate)
+    return clip_path
+
+
+def _save_audio_file_as_wav(audio_path: Path, sample_rate: int, source_tag: str) -> Path | None:
+    waveform, _ = librosa.load(str(audio_path), sr=sample_rate, mono=True)
+    return _save_waveform_clip(waveform.astype(np.float32, copy=False), sample_rate=sample_rate, source_tag=source_tag)
 
 class StreamSession:
     def __init__(
@@ -224,8 +268,10 @@ class StreamSession:
             self.mode,
             self.replace_buffer_on_chunk,
         )
+        latest_window = self._latest_inference_window()
+        _save_waveform_clip(latest_window, sample_rate=self.target_sample_rate, source_tag=f"ws-partial-{self.stream_id}")
         result = self.engine.predict_waveform(
-            self._latest_inference_window(),
+            latest_window,
             sr=self.target_sample_rate,
             mode=self.mode,
             source_name=f"{self.stream_id}:live",
@@ -252,8 +298,10 @@ class StreamSession:
             self.buffer.size / self.target_sample_rate,
             self.mode,
         )
+        latest_window = self._latest_inference_window()
+        _save_waveform_clip(latest_window, sample_rate=self.target_sample_rate, source_tag=f"ws-final-{self.stream_id}")
         result = self.engine.predict_waveform(
-            self._latest_inference_window(),
+            latest_window,
             sr=self.target_sample_rate,
             mode=self.mode,
             source_name=f"{self.stream_id}:final",
@@ -386,6 +434,7 @@ def create_app(
             with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
                 tmp.write(await file.read())
                 temp_path = Path(tmp.name)
+            _save_audio_file_as_wav(temp_path, sample_rate=engine.sample_rate, source_tag=f"predict-{file.filename or 'upload'}")
             result = engine.predict(temp_path, mode=resolved_mode)
             LOGGER.info(
                 "HTTP /predict result original_filename=%s genre=%s confidence=%.4f",
@@ -421,6 +470,7 @@ def create_app(
 
         try:
             LOGGER.info("HTTP /predict_json request audio_path=%s mode=%s", path, mode)
+            _save_audio_file_as_wav(path, sample_rate=engine.sample_rate, source_tag=f"predict-json-{path.stem}")
             result = engine.predict(path, mode=mode)
             LOGGER.info(
                 "HTTP /predict_json result audio_path=%s genre=%s confidence=%.4f",

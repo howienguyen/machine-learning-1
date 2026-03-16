@@ -225,33 +225,7 @@ Primary current training script:
 python MelCNN-MGR/model_training/logmel_cnn_v2_2.py
 ```
 
-Preferred staged run profile:
-
-```bash
-python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py \
-	--mode stage1 \
-	--stage1a-sources fma \
-	--stage1b-sources fma
-
-python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py \
-	--mode stage1 \
-	--stage1a-sources additional \
-	--stage1b-sources additional
-
-python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py \
-	--mode stage2
-
-python MelCNN-MGR/preprocessing/2_build_log_mel_dataset.py
-
-python MelCNN-MGR/model_training/logmel_cnn_v2_2.py
-```
-
-Why this profile is useful:
-
-1. it rebuilds FMA Stage 1a and Stage 1b artifacts together in one pass
-2. it rebuilds additional-dataset Stage 1a and Stage 1b artifacts together in one pass
-3. it then runs Stage 2 only after both source-specific sample manifests exist
-4. it keeps the final log-mel build and training steps explicit and easy to rerun independently
+The full production-like/demo workflow is documented once in `Main Run Profile` below.
 
 Experimental variant:
 
@@ -314,7 +288,7 @@ If you need the old fixed-shape v1.1 path, use `MelCNN-MGR/Lab/inference_logmel_
 
 ```bash
 python MelCNN-MGR/inference_web_service/app.py \
-	--model-dir MelCNN-MGR/models/<logmel-v2-family-model-dir> \
+	--model-dir MelCNN-MGR/models/<logmel-cnn-v2_2-YYYYMMDD-HHMMSS-or-other-compatible-model-dir> \
 	--host 127.0.0.1 \
 	--port 8000
 ```
@@ -328,8 +302,7 @@ This service currently wraps `model_inference/inference_logmel_cnn_v2_x.py`, so 
 
 ```bash
 # In a Windows CMD or PowerShell terminal:
-set MELCNN_INFERENCE_WS_URL=ws://127.0.0.1:8000/ws/stream
-set MELCNN_INFERENCE_SEND_INTERVAL_SEC=3
+.venvw/Scripts/activate
 python MelCNN-MGR/demo-app/web_audio_capture_v1.py
 ```
 
@@ -339,6 +312,45 @@ Then open:
 http://127.0.0.1:5000
 ```
 
+## Main Run Profile
+
+The current main production-like/demo profile is:
+
+```bash
+python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py \
+	--mode stage1 \
+	--stage1a-sources fma \
+	--stage1b-sources fma
+
+python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py \
+	--mode stage1 \
+	--stage1a-sources additional \
+	--stage1b-sources additional
+
+python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py \
+	--mode stage2
+
+python MelCNN-MGR/preprocessing/2_build_log_mel_dataset.py
+
+python MelCNN-MGR/model_training/logmel_cnn_v2_2.py
+
+python MelCNN-MGR/inference_web_service/app.py \
+	--model-dir MelCNN-MGR/models/<choose-a-compatible-trained-model-dir>
+
+.venvw/Scripts/activate
+python MelCNN-MGR/demo-app/web_audio_capture_v1.py
+```
+
+Practical interpretation:
+
+1. run Stage 1 once for FMA only
+2. run Stage 1 once for `additional` only
+3. run Stage 2 after both source-specific Stage 1 outputs exist
+4. build the fixed log-mel dataset cache and parquet indexes
+5. train the current primary model with `logmel_cnn_v2_2.py`
+6. start the inference web service with the exact model directory you want to serve
+7. on Windows, activate `.venvw` and launch the streaming demo app
+
 ## Practical Run Order
 
 For the current production-like training flow, the practical order is:
@@ -347,38 +359,23 @@ For the current production-like training flow, the practical order is:
 2. manifest build via `1_build_all_datasets_and_samples_v1_1.py`
 3. log-mel build via `2_build_log_mel_dataset.py`
 4. EDA in `2_MelCNN_MGR_Manifest_LogMel_EDA.ipynb`
-5. training in `logmel_cnn_v2_1.py` as the primary training script, or `logmel_cnn_v2_1_exp.py` for controlled experiments
+5. training in `logmel_cnn_v2_2.py` as the primary current training script, with `logmel_cnn_v2_1.py` / `logmel_cnn_v2_1_exp.py` as comparison or warm-start references
 6. if you need the currently documented web demo/service path, use a compatible v2-family inference model directory with `model_inference/inference_logmel_cnn_v2_x.py` / `inference_web_service/app.py`
 7. streaming demo through `demo-app/web_audio_capture_v1.py`
 
 If you want to continue experimentation from an existing trained checkpoint while still producing a new run lineage, use `MelCNN-MGR/model_training/logmel_cnn_v2_1.py` or `MelCNN-MGR/model_training/logmel_cnn_v2_1_exp.py` with `--pretrained-model ...`.
 
-### Explicit One-Run-Per-Source Commands for Stage 1
+## Baselines
 
-#### Stage 1a: FMA only
-```bash
-python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py \
-    --mode stage1a \
-    --stage1a-sources fma
-```
+Useful baseline and legacy references:
 
-#### Stage 1a: Additional datasets only
-```bash
-python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py \
-    --mode stage1a \
-    --stage1a-sources additional
-```
+1. `MelCNN-MGR/Lab/build_manifest.py`
+2. `MelCNN-MGR/Lab/build_tiny_dataset.py`
+3. `MelCNN-MGR/model_training/baseline_mfcc_cnn_v5.ipynb`
+4. `MelCNN-MGR/model_training/baseline_logmel_cnn_v1.ipynb`
 
-#### Stage 1b: FMA only
-```bash
-python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py \
-    --mode stage1b \
-    --stage1b-sources fma
-```
+Practical meaning:
 
-#### Stage 1b: Additional datasets only
-```bash
-python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py \
-    --mode stage1b \
-    --stage1b-sources additional
-```
+1. `build_manifest.py` and `build_tiny_dataset.py` are useful older Lab utilities for baseline dataset preparation and smoke-test workflows
+2. `baseline_mfcc_cnn_v5.ipynb` is the MFCC baseline notebook reference
+3. `baseline_logmel_cnn_v1.ipynb` is the earlier log-mel baseline notebook reference

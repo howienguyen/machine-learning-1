@@ -71,6 +71,7 @@ import shutil
 import subprocess
 import time
 import warnings
+import wave
 from pathlib import Path
 
 import numpy as np
@@ -84,6 +85,9 @@ WORKSPACE = MELCNN_DIR.parent
 DEFAULT_MANIFEST_PATH = MELCNN_DIR / "data" / "processed" / "manifest_final_samples.parquet"
 DEFAULT_SETTINGS_PATH = MELCNN_DIR / "settings.json"
 DEFAULT_SAMPLE_LENGTH_SEC = 15.0
+TMP_BUILD_LOGMEL_DIR = (MELCNN_DIR / "data" / "tmp_build_log_mel").resolve()
+MAX_SAVED_DEBUG_CLIPS = 10
+SAVE_LOADED_AUDIO_DEBUG_CLIPS = True
 
 
 def _load_data_sampling_settings(settings_path: Path) -> dict[str, object] | None:
@@ -145,7 +149,7 @@ def load_target_genres_from_settings(settings_path: Path) -> list[str]:
 DEFAULT_SAMPLE_LENGTH_FROM_SETTINGS = load_default_sample_length_from_settings(DEFAULT_SETTINGS_PATH)
 
 DEFAULT_OUT_ROOT = MELCNN_DIR / "cache" / f"logmel_dataset_{DEFAULT_SAMPLE_LENGTH_FROM_SETTINGS:g}s"
-DEFAULT_NUM_WORKERS = min(4, (os.cpu_count() or 4))
+DEFAULT_NUM_WORKERS = min(4, (os.cpu_count() or 6))
 
 DEFAULT_SAMPLE_RATE = 22050
 DEFAULT_N_MELS = 192
@@ -290,6 +294,62 @@ def _ensure_librosa_available() -> None:
         ) from exc
 
 
+def _sanitize_debug_component(text: object) -> str:
+    value = re.sub(r"[^A-Za-z0-9._-]+", "_", str(text).strip())
+    value = value.strip("._")
+    return value or "clip"
+
+
+def _trim_saved_debug_clips(directory: Path, keep_latest: int) -> None:
+    wav_files = sorted(directory.glob("*.wav"), key=lambda path: path.stat().st_mtime, reverse=True)
+    for stale_path in wav_files[keep_latest:]:
+        stale_path.unlink(missing_ok=True)
+
+
+def _save_loaded_audio_debug_clip(
+    waveform: np.ndarray,
+    sample_rate: int,
+    filepath: Path,
+    start_sec: float,
+    duration_sec: float,
+    loader_tag: str,
+) -> Path | None:
+    if not SAVE_LOADED_AUDIO_DEBUG_CLIPS:
+        return None
+    if waveform is None or waveform.size == 0:
+        return None
+
+    TMP_BUILD_LOGMEL_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    millis = int((time.time() % 1) * 1000)
+    clip_name = (
+        f"{timestamp}-{millis:03d}-pid{os.getpid()}-"
+        f"{_sanitize_debug_component(loader_tag)}-"
+        f"{_sanitize_debug_component(filepath.stem)}-"
+        f"{int(round(start_sec * 1000)):07d}ms-"
+        f"{int(round(duration_sec * 1000)):07d}ms.wav"
+    )
+    clip_path = TMP_BUILD_LOGMEL_DIR / clip_name
+
+    pcm16 = np.clip(np.asarray(waveform, dtype=np.float32), -1.0, 1.0)
+    pcm16 = (pcm16 * 32767.0).astype("<i2")
+    with wave.open(str(clip_path), "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(int(sample_rate))
+        wav_file.writeframes(pcm16.tobytes())
+
+    _trim_saved_debug_clips(TMP_BUILD_LOGMEL_DIR, MAX_SAVED_DEBUG_CLIPS)
+    logging.debug(
+        "Saved decoded debug clip path=%s sample_rate=%s seconds=%.3f loader=%s",
+        clip_path,
+        sample_rate,
+        len(pcm16) / sample_rate,
+        loader_tag,
+    )
+    return clip_path
+
+
 def _load_audio_ffmpeg(
     filepath: Path,
     sr: int,
@@ -325,6 +385,14 @@ def _load_audio_ffmpeg(
     y = np.frombuffer(proc.stdout, dtype=np.float32)
     if y.size == 0:
         raise RuntimeError("ffmpeg produced empty audio output")
+    _save_loaded_audio_debug_clip(
+        y,
+        sample_rate=sr,
+        filepath=filepath,
+        start_sec=start_sec,
+        duration_sec=duration_sec,
+        loader_tag="ffmpeg",
+    )
     return y
 
 
@@ -344,7 +412,16 @@ def _load_audio_librosa(
         offset=float(start_sec),
         duration=float(duration_sec),
     )
-    return y.astype(np.float32, copy=False)
+    y = y.astype(np.float32, copy=False)
+    _save_loaded_audio_debug_clip(
+        y,
+        sample_rate=sr,
+        filepath=filepath,
+        start_sec=start_sec,
+        duration_sec=duration_sec,
+        loader_tag="librosa",
+    )
+    return y
 
 
 def _load_audio_segment(
