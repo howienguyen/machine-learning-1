@@ -62,6 +62,29 @@ import warnings
 from pathlib import Path
 from types import SimpleNamespace
 
+
+def _resolve_early_device_backend(argv: list[str]) -> str:
+    cli_backend = None
+    for index, token in enumerate(argv):
+        if token == "--device-backend" and index + 1 < len(argv):
+            cli_backend = argv[index + 1].strip().lower()
+            break
+        if token.startswith("--device-backend="):
+            cli_backend = token.split("=", 1)[1].strip().lower()
+            break
+
+    if cli_backend:
+        return cli_backend
+    return os.environ.get("LOGMEL_CNN_DEVICE_BACKEND", "auto").strip().lower()
+
+
+EARLY_DEVICE_BACKEND = _resolve_early_device_backend(sys.argv[1:])
+
+os.environ["ONEDNN_VERBOSE"] = "none"
+os.environ["DNNL_VERBOSE"] = "0"
+if EARLY_DEVICE_BACKEND in {"xpu", "cpu"}:
+    os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import numpy as np
@@ -74,8 +97,6 @@ from tensorflow import keras
 from tensorflow.keras import layers
 
 
-os.environ["ONEDNN_VERBOSE"] = "none"
-os.environ["DNNL_VERBOSE"] = "0"
 warnings.filterwarnings("ignore", category=UserWarning)
 
 
@@ -157,6 +178,12 @@ CLI_PARSER.add_argument(
     default=None,
     help="Freeze transferred backbone layers for the first N epochs after backbone_only initialization.",
 )
+CLI_PARSER.add_argument(
+    "--device-backend",
+    choices=["auto", "xpu", "cuda", "cpu"],
+    default=None,
+    help="Preferred runtime backend. Defaults to LOGMEL_CNN_DEVICE_BACKEND or auto-detection when unset.",
+)
 CLI_ARGS, _CLI_UNKNOWN = CLI_PARSER.parse_known_args()
 
 
@@ -217,7 +244,7 @@ print(f"Run directory : {RUN_DIR}")
 print(f"Console log   : {CONSOLE_LOG_PATH}")
 
 EPOCHS = 136
-BATCH_SIZE = 64
+BATCH_SIZE = 48
 LABEL_SMOOTHING = 0.0            # Mixup already softens labels; keep CE targets sharp otherwise
 WEIGHT_DECAY = 1e-4                # L2 Regularization - v2.1: 1e-4 (was v2: 5e-4) — lighter with Mixup+dropout active
 
@@ -259,11 +286,16 @@ FREEZE_BACKBONE_EPOCHS = max(
         else os.environ.get("LOGMEL_CNN_FREEZE_BACKBONE_EPOCHS", "0")
     ),
 )
+DEVICE_BACKEND = (
+    CLI_ARGS.device_backend
+    or os.environ.get("LOGMEL_CNN_DEVICE_BACKEND", "auto")
+).strip().lower()
 if PRETRAINED_MODEL_PATH is not None:
     print(f"[WarmStart] LOGMEL_CNN_PRETRAINED_MODEL={PRETRAINED_MODEL_PATH}")
     print(f"[WarmStart] PRETRAINED_MODE={PRETRAINED_MODE}")
 if FREEZE_BACKBONE_EPOCHS > 0:
     print(f"[WarmStart] FREEZE_BACKBONE_EPOCHS={FREEZE_BACKBONE_EPOCHS}")
+print(f"[Runtime] DEVICE_BACKEND={DEVICE_BACKEND}")
 
 SEED = 36
 random.seed(SEED)
@@ -292,6 +324,16 @@ def _best_effort_set_memory_growth(tf_module, device_type: str):
     return devices
 
 
+def _hide_device_type(tf_module, device_type: str) -> None:
+    try:
+        visible_devices = tf_module.config.get_visible_devices()
+        keep_devices = [device for device in visible_devices if device.device_type != device_type]
+        tf_module.config.set_visible_devices(keep_devices)
+        print(f"Hid visible {device_type} devices to honor backend preference")
+    except Exception as exc:
+        print(f"[WARN] Failed to hide {device_type} devices: {exc}")
+
+
 def _smoke_test_matmul(tf_module, device: str, n: int = 1024) -> tuple[bool, str]:
     try:
         with tf.device(device):
@@ -304,38 +346,76 @@ def _smoke_test_matmul(tf_module, device: str, n: int = 1024) -> tuple[bool, str
         return False, repr(exc)
 
 
-def configure_runtime_device(tf_module):
-    print(f"Platform   : {platform.platform()}")
-    print(f"TensorFlow : {tf_module.__version__}")
-
+def _try_cuda_runtime(tf_module):
     try:
         gpus = _best_effort_set_memory_growth(tf_module, "GPU")
     except Exception:
         gpus = []
-    if gpus:
-        ok, info = _smoke_test_matmul(tf_module, "/GPU:0")
-        if ok:
-            return "/GPU:0", "cuda", [d.name for d in gpus], info
-        print("CUDA present but failed smoke test ->", info)
+    if not gpus:
+        return None
 
+    ok, info = _smoke_test_matmul(tf_module, "/GPU:0")
+    if ok:
+        return "/GPU:0", "cuda", [d.name for d in gpus], info
+    print("CUDA present but failed smoke test ->", info)
+    return None
+
+
+def _try_xpu_runtime(tf_module):
     try:
         import intel_extension_for_tensorflow as itex  # noqa: F401
 
         xpus = _best_effort_set_memory_growth(tf_module, "XPU")
     except Exception as exc:
-        xpus = []
         print("ITEX/XPU not available:", repr(exc))
+        return None
 
-    if xpus:
-        ok, info = _smoke_test_matmul(tf_module, "/XPU:0")
-        if ok:
-            return "/XPU:0", "xpu", [d.name for d in xpus], info
-        print("XPU present but failed smoke test ->", info)
+    if not xpus:
+        return None
+
+    ok, info = _smoke_test_matmul(tf_module, "/XPU:0")
+    if ok:
+        return "/XPU:0", "xpu", [d.name for d in xpus], info
+    print("XPU present but failed smoke test ->", info)
+    return None
+
+
+def configure_runtime_device(tf_module, preferred_backend: str = "auto"):
+    print(f"Platform   : {platform.platform()}")
+    print(f"TensorFlow : {tf_module.__version__}")
+
+    if preferred_backend == "xpu":
+        _hide_device_type(tf_module, "GPU")
+        runtime = _try_xpu_runtime(tf_module)
+        if runtime is not None:
+            return runtime
+        print("Preferred backend XPU unavailable -> CPU fallback")
+        return "/CPU:0", "cpu", [], "ok"
+
+    if preferred_backend == "cuda":
+        runtime = _try_cuda_runtime(tf_module)
+        if runtime is not None:
+            return runtime
+        print("Preferred backend CUDA unavailable -> CPU fallback")
+        return "/CPU:0", "cpu", [], "ok"
+
+    if preferred_backend == "cpu":
+        _hide_device_type(tf_module, "GPU")
+        _hide_device_type(tf_module, "XPU")
+        return "/CPU:0", "cpu", [], "ok"
+
+    runtime = _try_cuda_runtime(tf_module)
+    if runtime is not None:
+        return runtime
+
+    runtime = _try_xpu_runtime(tf_module)
+    if runtime is not None:
+        return runtime
 
     return "/CPU:0", "cpu", [], "ok"
 
 
-RUNTIME_DEVICE, BACKEND, ACCEL_NAMES, SMOKE_INFO = configure_runtime_device(tf)
+RUNTIME_DEVICE, BACKEND, ACCEL_NAMES, SMOKE_INFO = configure_runtime_device(tf, DEVICE_BACKEND)
 print(f"Backend    : {BACKEND.upper()} ({RUNTIME_DEVICE})")
 print(f"Devices    : {ACCEL_NAMES if ACCEL_NAMES else 'none detected -> CPU fallback'}")
 print(f"Smoke test : {SMOKE_INFO}")

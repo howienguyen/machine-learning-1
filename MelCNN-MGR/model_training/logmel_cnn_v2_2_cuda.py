@@ -80,7 +80,7 @@ from tensorflow import keras
 from tensorflow.keras import layers
 
 
-warnings.filterwarnings("ignore", category=UserWarning)
+# warnings.filterwarnings("ignore", category=UserWarning)
 
 
 def _configure_tensorflow_runtime() -> None:
@@ -147,7 +147,7 @@ def _start_console_capture(log_path: Path) -> None:
 
 atexit.register(_stop_console_capture)
 
-_configure_tensorflow_runtime()
+# _configure_tensorflow_runtime()
 
 print(f"Python     : {platform.python_version()}")
 print(f"TensorFlow : {tf.__version__}")
@@ -239,7 +239,7 @@ print(f"Run directory : {RUN_DIR}")
 print(f"Console log   : {CONSOLE_LOG_PATH}")
 
 EPOCHS = 136
-BATCH_SIZE = 32
+BATCH_SIZE = 48
 JIT_COMPILE = False
 LABEL_SMOOTHING = 0.0            # Mixup already softens labels; keep CE targets sharp otherwise
 WEIGHT_DECAY = 1e-4                # L2 Regularization - v2.1: 1e-4 (was v2: 5e-4) — lighter with Mixup+dropout active
@@ -251,6 +251,7 @@ SPEC_AUG_NUM_MASKS = 1             # v2.1: 1 (was v2: 2) — avoid overmasking w
 MAX_CLASS_WEIGHT = 1.5             # cap class weights to prevent over-prediction
 MIXUP_ALPHA = 0.3                  # keep the v2 Mixup blending parameter unchanged
 CLASS_WEIGHT_IMBALANCE_THRESHOLD = 1.05
+DISABLE_SPATIAL_DROPOUT = True     # diagnostic: bypass SpatialDropout2D to isolate CUDA/layout issues
 SPATIAL_DROPOUT_RATE_BLOCK2 = 0.05  # v2.1: graduated — light in early layers
 SPATIAL_DROPOUT_RATE_BLOCK3 = 0.10
 SPATIAL_DROPOUT_RATE_BLOCK4 = 0.15  # v2.1: graduated — stronger in deep layers
@@ -808,6 +809,12 @@ print(f"\nPreprocessing : {_section_times['6. Preprocessing']:.2f}s")
 _t0 = time.perf_counter()
 
 
+def _maybe_spatial_dropout(x: tf.Tensor, rate: float, name: str) -> tf.Tensor:
+    if DISABLE_SPATIAL_DROPOUT or rate <= 0.0:
+        return x
+    return layers.SpatialDropout2D(rate, name=name)(x)
+
+
 def build_model(n_classes: int) -> keras.Model:
     inputs = keras.Input(shape=(*LOGMEL_SHAPE, 1), name="logmel")
 
@@ -821,28 +828,28 @@ def build_model(n_classes: int) -> keras.Model:
     x = layers.Conv2D(64, (3, 3), padding="same", use_bias=False, name="conv2")(x)
     x = layers.BatchNormalization(name="bn2")(x)
     x = layers.ReLU(name="relu2")(x)
-    x = layers.SpatialDropout2D(SPATIAL_DROPOUT_RATE_BLOCK2, name="sdrop2")(x)
+    x = _maybe_spatial_dropout(x, SPATIAL_DROPOUT_RATE_BLOCK2, name="sdrop2")
     x = layers.MaxPool2D((2, 2), name="pool2")(x)
 
     # Block 3: 128 filters, 3×3
     x = layers.Conv2D(128, (3, 3), padding="same", use_bias=False, name="conv3")(x)
     x = layers.BatchNormalization(name="bn3")(x)
     x = layers.ReLU(name="relu3")(x)
-    x = layers.SpatialDropout2D(SPATIAL_DROPOUT_RATE_BLOCK3, name="sdrop3")(x)
+    x = _maybe_spatial_dropout(x, SPATIAL_DROPOUT_RATE_BLOCK3, name="sdrop3")
     x = layers.MaxPool2D((2, 2), name="pool3")(x)
 
     # Block 4: 256 filters — keep moderate spatial dropout in later blocks
     x = layers.Conv2D(256, (3, 3), padding="same", use_bias=False, name="conv4")(x)
     x = layers.BatchNormalization(name="bn4")(x)
     x = layers.ReLU(name="relu4")(x)
-    x = layers.SpatialDropout2D(SPATIAL_DROPOUT_RATE_BLOCK4, name="sdrop4")(x)
+    x = _maybe_spatial_dropout(x, SPATIAL_DROPOUT_RATE_BLOCK4, name="sdrop4")
     x = layers.MaxPool2D((2, 2), name="pool4")(x)
 
     # Block 5: 256 filters — keep moderate spatial dropout in later blocks
     x = layers.Conv2D(256, (3, 3), padding="same", use_bias=False, name="conv5")(x)
     x = layers.BatchNormalization(name="bn5")(x)
     x = layers.ReLU(name="relu5")(x)
-    x = layers.SpatialDropout2D(SPATIAL_DROPOUT_RATE_BLOCK5, name="sdrop5")(x)
+    x = _maybe_spatial_dropout(x, SPATIAL_DROPOUT_RATE_BLOCK5, name="sdrop5")
     x = layers.MaxPool2D((2, 2), name="pool5")(x)
 
     # Classifier head — wider bottleneck preserves backbone features
@@ -1460,6 +1467,7 @@ print(
 )
 print(f"JIT compile  : {JIT_COMPILE}")
 print(f"Precision    : {keras.mixed_precision.global_policy().name}")
+print(f"SpatialDropout2D : {'disabled (diagnostic)' if DISABLE_SPATIAL_DROPOUT else 'enabled'}")
 print("Optimizer continuity : preserved across staged freeze/unfreeze training")
 if PRETRAINED_MODEL_PATH is not None:
     print(f"Warm-start   : {PRETRAINED_MODEL_PATH}")
@@ -1792,6 +1800,7 @@ report = {
         "class_weights_enabled": USE_CLASS_WEIGHTS,
         "class_weight_balance_ratio": round(float(train_class_balance_ratio), 4),
         "max_class_weight": MAX_CLASS_WEIGHT,
+        "disable_spatial_dropout": DISABLE_SPATIAL_DROPOUT,
         "spatial_dropout_block2": SPATIAL_DROPOUT_RATE_BLOCK2,
         "spatial_dropout_block3": SPATIAL_DROPOUT_RATE_BLOCK3,
         "spatial_dropout_block4": SPATIAL_DROPOUT_RATE_BLOCK4,
