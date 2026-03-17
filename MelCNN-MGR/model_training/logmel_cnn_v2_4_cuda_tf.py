@@ -159,14 +159,16 @@ def _start_console_capture(log_path: Path) -> None:
 
 atexit.register(_stop_console_capture)
 
-# _configure_tensorflow_runtime()
+LAYOUT_OPTIMIZER_DISABLED = True
+if LAYOUT_OPTIMIZER_DISABLED:
+    _configure_tensorflow_runtime()
 
 print(f"Python     : {platform.python_version()}")
 print(f"TensorFlow : {tf.__version__}")
 keras.mixed_precision.set_global_policy("float32")
 print(f"XLA auto-JIT: {os.environ['TF_XLA_FLAGS']}")
 print(f"oneDNN opts : {os.environ['TF_ENABLE_ONEDNN_OPTS']}")
-print(f"Layout opt  : disabled")
+print(f"Layout opt  : {'disabled' if LAYOUT_OPTIMIZER_DISABLED else 'default'}")
 print(f"Precision  : {keras.mixed_precision.global_policy().name}")
 
 
@@ -927,11 +929,18 @@ val_ds = make_dataset(val_df, val_shards_df, BATCH_SIZE, shuffle=False, augment=
 test_ds = make_dataset(test_df, test_shards_df, BATCH_SIZE, shuffle=False, augment=False)
 
 train_ds = make_dataset(train_df, train_shards_df, BATCH_SIZE, shuffle=True, augment=True, weighted_mixup=USE_CLASS_WEIGHTS)
-train_fit_ds = train_ds
+train_fit_ds = train_ds.repeat()
 
 
 def _batch_count(n_rows: int, batch_size: int) -> int:
     return max(1, math.ceil(n_rows / batch_size))
+
+
+def _log_dataset_cardinality(name: str, ds: tf.data.Dataset) -> None:
+    try:
+        print(f"{name} cardinality: {ds.cardinality().numpy()}")
+    except Exception as exc:
+        print(f"[WARN] Could not read {name} cardinality: {exc}")
 
 print("\nDatasets ready:")
 print(f"  train batches: {_batch_count(len(train_df), BATCH_SIZE)}  (SpecAugment=ON, Mixup=ON)")
@@ -939,6 +948,8 @@ print(f"  train fit     : class_weights={'ON (pre-Mixup anchor)' if USE_CLASS_WE
 print(f"  train eval    : {_batch_count(len(train_df), BATCH_SIZE)}  (SpecAugment=OFF, Mixup=OFF)")
 print(f"  val   batches: {_batch_count(len(val_df), BATCH_SIZE)}  (SpecAugment=OFF, Mixup=OFF)")
 print(f"  test  batches: {_batch_count(len(test_df), BATCH_SIZE)}  (SpecAugment=OFF, Mixup=OFF)")
+_log_dataset_cardinality("train_fit_ds", train_fit_ds)
+_log_dataset_cardinality("val_ds", val_ds)
 
 _section_times["6. Preprocessing"] = time.perf_counter() - _t0
 print(f"\nPreprocessing : {_section_times['6. Preprocessing']:.2f}s")
@@ -1584,6 +1595,8 @@ def _run_training_stage(
         stage_history = model.fit(
             train_fit_ds,
             validation_data=val_ds,
+            steps_per_epoch=steps_per_epoch,
+            validation_steps=_batch_count(len(val_df), BATCH_SIZE),
             initial_epoch=initial_epoch,
             epochs=initial_epoch + epochs_to_run,
             callbacks=stage_callbacks,
