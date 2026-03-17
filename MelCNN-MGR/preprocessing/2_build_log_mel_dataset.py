@@ -148,7 +148,9 @@ def load_target_genres_from_settings(settings_path: Path) -> list[str]:
 
 DEFAULT_SAMPLE_LENGTH_FROM_SETTINGS = load_default_sample_length_from_settings(DEFAULT_SETTINGS_PATH)
 
-DEFAULT_OUT_ROOT = MELCNN_DIR / "cache" / f"logmel_dataset_{DEFAULT_SAMPLE_LENGTH_FROM_SETTINGS:g}s"
+# DEFAULT_OUT_ROOT = MELCNN_DIR / "cache" / f"logmel_dataset_{DEFAULT_SAMPLE_LENGTH_FROM_SETTINGS:g}s"
+DEFAULT_OUT_ROOT = Path("/home/hsnguyen") / "model-training-data-cache" / f"logmel_dataset_{DEFAULT_SAMPLE_LENGTH_FROM_SETTINGS:g}s"
+
 DEFAULT_NUM_WORKERS = min(4, (os.cpu_count() or 6))
 
 DEFAULT_SAMPLE_RATE = 22050

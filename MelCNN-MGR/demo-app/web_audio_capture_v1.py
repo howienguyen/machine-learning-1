@@ -2065,15 +2065,23 @@ def index():
                                         receivedChunks.textContent = String(data.received_chunks || 0);
                                         sentPayloads.textContent = String(data.sent_payloads || 0);
                                         bufferSeconds.textContent = Number(data.buffer_seconds || 0).toFixed(2);
-                                        reconnectCount.textContent = String(data.reconnect_count || 0);
+                                        if (reconnectCount) {
+                                            reconnectCount.textContent = String(data.reconnect_count || 0);
+                                        }
                                         retryBtn.disabled = !data.capturing || data.connected || data.reconnecting;
 
                                         const partial = data.last_partial;
                                         if (partial) {
                                             const warmup = partial.is_warmup ? ' [warmup]' : '';
-                                            partialPrediction.textContent = `${partial.genre} (${(partial.confidence * 100).toFixed(1)}%)${warmup}`;
-                                            partialTopK.textContent = formatTopK(partial.top_k);
-                                            partialTimestamp.textContent = `Timestamp: ${partial.timestamp || '---'}`;
+                                            if (partialPrediction) {
+                                                partialPrediction.textContent = `${partial.genre} (${(partial.confidence * 100).toFixed(1)}%)${warmup}`;
+                                            }
+                                            if (partialTopK) {
+                                                partialTopK.textContent = formatTopK(partial.top_k);
+                                            }
+                                            if (partialTimestamp) {
+                                                partialTimestamp.textContent = `Timestamp: ${partial.timestamp || '---'}`;
+                                            }
                                             partialPredictionUpdatedAtMs = parseTimestampMs(partial.timestamp) || Date.now();
                                             applyPartialPredictionFade();
                                             ensurePartialPredictionFadeTimer();
@@ -2081,9 +2089,15 @@ def index():
 
                                         const final = data.last_final;
                                         if (final) {
-                                            finalPrediction.textContent = `${final.genre} (${(final.confidence * 100).toFixed(1)}%)`;
-                                            finalTopK.textContent = formatTopK(final.top_k);
-                                            finalTimestamp.textContent = `Timestamp: ${final.timestamp || '---'}`;
+                                            if (finalPrediction) {
+                                                finalPrediction.textContent = `${final.genre} (${(final.confidence * 100).toFixed(1)}%)`;
+                                            }
+                                            if (finalTopK) {
+                                                finalTopK.textContent = formatTopK(final.top_k);
+                                            }
+                                            if (finalTimestamp) {
+                                                finalTimestamp.textContent = `Timestamp: ${final.timestamp || '---'}`;
+                                            }
                                         }
 
                                         if (data.last_error) {
@@ -2174,7 +2188,9 @@ def index():
                                                 if (!res.ok) return;
                                                 const data = await res.json();
                                                 updateInferenceUI(data);
-                                            } catch (e) {}
+                                            } catch (e) {
+                                                console.error('Inference status poll failed', e);
+                                            }
                                         };
                                         await poll();
                                         inferencePoll = setInterval(poll, 250);

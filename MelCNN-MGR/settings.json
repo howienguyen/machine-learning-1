@@ -9,7 +9,8 @@
 			"Jazz",
 			"Country",
 			"Blues",
-			"Bolero"
+			"Bolero",
+			"Speech"
 		],
 		"number_of_samples_expected_each_genre": 2000,
 		"additional_samples_contribution_ratio_expected_each_genre": 0.5,

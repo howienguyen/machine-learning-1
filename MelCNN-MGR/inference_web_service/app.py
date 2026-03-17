@@ -59,10 +59,9 @@ from model_inference.inference_logmel_cnn_v2_x import (
     PredictionResult,
 )
 
-
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8000
-DEFAULT_MODEL_DIR = (MELCNN_DIR / "demo-models" / "logmel-cnn-v2_2-20260314-054310").resolve()
+DEFAULT_MODEL_DIR = (MELCNN_DIR / "demo-models" / "logmel-cnn-v2_2-20260316-145637-bolero").resolve()
 STREAM_PATH = "/ws/stream"
 LOGGER = logging.getLogger("melcnn.inference_web_service")
 DEFAULT_WS_PING_INTERVAL = 20.0
@@ -367,12 +366,13 @@ def create_app(
         prefer_macro_f1=prefer_macro_f1,
     )
     LOGGER.info(
-        "Loaded inference model model_file=%s sample_rate=%s clip_duration=%.3f logmel_shape=%s classes=%s",
+        "Loaded inference model model_file=%s sample_rate=%s clip_duration=%.3f logmel_shape=%s classes=%s normalization=%s",
         engine.model_path.name,
         engine.sample_rate,
         engine.clip_duration,
         engine.logmel_shape,
         engine.n_classes,
+        engine.normalization_info.get("resolved_type"),
     )
 
     app = FastAPI(title="Log-Mel CNN v2.x Family Inference Service")
@@ -391,6 +391,7 @@ def create_app(
             "clip_duration": engine.clip_duration,
             "logmel_shape": list(engine.logmel_shape),
             "n_classes": engine.n_classes,
+            "normalization": engine.normalization_info,
         }
 
     @app.get("/model")
@@ -404,6 +405,7 @@ def create_app(
             "logmel_shape": list(engine.logmel_shape),
             "genre_classes": engine.genre_classes,
             "n_classes": engine.n_classes,
+            "normalization": engine.normalization_info,
             "run_report": engine.run_report,
         }
 

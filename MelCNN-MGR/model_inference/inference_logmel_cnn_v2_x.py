@@ -12,7 +12,8 @@ the run artifacts so it can match the training-time log-mel shape.
 Key behavior:
   - Loads best_model_macro_f1.keras by default.
   - Falls back to the final saved model, then any other .keras file.
-  - Loads mu/std/genre_classes from norm_stats.npz.
+    - Loads normalization stats from norm_stats.npz, preferring explicit
+        mean_per_bin/std_per_bin when available and falling back to legacy mu/std.
   - Reads feature_config from run_report_*.json when available.
   - Validates the resolved log-mel input shape against model.input_shape.
   - Supports single-crop and three-crop inference.
@@ -21,11 +22,14 @@ Key behavior:
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import math
 import shutil
-import subprocess
 import sys
+import subprocess
+import tempfile
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -42,11 +46,206 @@ DEFAULT_N_FFT = 512
 DEFAULT_HOP_LENGTH = 256
 
 
+def _install_keras_module_aliases() -> None:
+    """Bridge internal Keras module path changes across runtime versions.
+
+    Some `.keras` archives saved from newer Keras builds serialize the
+    Functional model class as `keras.src.models.functional.Functional`, while
+    older TF/Keras runtimes still expose that implementation from
+    `keras.src.engine.functional`.
+    """
+
+    module_aliases = {
+        "keras.src.models.functional": "keras.src.engine.functional",
+    }
+
+    for missing_name, target_name in module_aliases.items():
+        try:
+            importlib.import_module(missing_name)
+            continue
+        except ModuleNotFoundError:
+            pass
+
+        try:
+            target_module = importlib.import_module(target_name)
+        except ModuleNotFoundError:
+            continue
+
+        sys.modules[missing_name] = target_module
+
+        parent_name, child_name = missing_name.rsplit(".", 1)
+        try:
+            parent_module = importlib.import_module(parent_name)
+            setattr(parent_module, child_name, target_module)
+        except Exception:
+            pass
+
+
+def _rewrite_keras_config_for_legacy_runtime(config: dict[str, object]) -> bool:
+    """Patch newer Keras serialization fields for older TF/Keras runtimes."""
+
+    changed = False
+
+    def _normalize_dtype_policy(node: object) -> None:
+        nonlocal changed
+
+        if isinstance(node, dict):
+            dtype_value = node.get("dtype")
+            if (
+                isinstance(dtype_value, dict)
+                and dtype_value.get("class_name") == "DTypePolicy"
+                and isinstance(dtype_value.get("config"), dict)
+                and isinstance(dtype_value["config"].get("name"), str)
+            ):
+                node["dtype"] = dtype_value["config"]["name"]
+                changed = True
+
+            for value in node.values():
+                _normalize_dtype_policy(value)
+        elif isinstance(node, list):
+            for item in node:
+                _normalize_dtype_policy(item)
+
+    _normalize_dtype_policy(config)
+
+    if config.get("module") == "keras.src.models.functional":
+        config["module"] = "keras.src.engine.functional"
+        changed = True
+
+    model_config = config.get("config")
+    if not isinstance(model_config, dict):
+        return changed
+
+    layers = model_config.get("layers")
+    if not isinstance(layers, list):
+        return changed
+
+    for layer in layers:
+        if not isinstance(layer, dict):
+            continue
+
+        layer_config = layer.get("config")
+        if not isinstance(layer_config, dict):
+            continue
+
+        class_name = layer.get("class_name")
+        if class_name == "InputLayer":
+            batch_shape = layer_config.pop("batch_shape", None)
+            if batch_shape is not None and "batch_input_shape" not in layer_config:
+                layer_config["batch_input_shape"] = batch_shape
+                changed = True
+            if layer_config.pop("optional", None) is not None:
+                changed = True
+        elif class_name == "Dense":
+            if "quantization_config" in layer_config:
+                layer_config.pop("quantization_config", None)
+                changed = True
+
+    return changed
+
+
+def _build_legacy_compatible_archive(model_path: Path) -> Path | None:
+    """Create a temporary `.keras` archive with config rewrites if needed."""
+
+    with zipfile.ZipFile(model_path) as src:
+        config = json.loads(src.read("config.json"))
+        if not _rewrite_keras_config_for_legacy_runtime(config):
+            return None
+
+        tmp_dir = Path(tempfile.mkdtemp(prefix="melcnn-keras-compat-"))
+        compat_path = tmp_dir / model_path.name
+        with zipfile.ZipFile(compat_path, "w") as dst:
+            for info in src.infolist():
+                if info.filename == "config.json":
+                    dst.writestr(info, json.dumps(config))
+                else:
+                    dst.writestr(info, src.read(info.filename))
+        return compat_path
+
+
+def _load_v2x_model_from_archive(tf_module, model_path: Path):
+    """Rebuild the simple v2.x CNN from archive JSON and load its weights."""
+
+    with zipfile.ZipFile(model_path) as src:
+        config = json.loads(src.read("config.json"))
+        _rewrite_keras_config_for_legacy_runtime(config)
+
+        model_config = config.get("config")
+        if not isinstance(model_config, dict):
+            raise ValueError("Unsupported Keras archive: missing top-level model config.")
+
+        layers_config = model_config.get("layers")
+        if not isinstance(layers_config, list) or not layers_config:
+            raise ValueError("Unsupported Keras archive: missing layer config list.")
+
+        input_entry = layers_config[0]
+        if input_entry.get("class_name") != "InputLayer":
+            raise ValueError("Unsupported v2.x archive: first layer is not an InputLayer.")
+
+        input_config = input_entry.get("config", {})
+        batch_input_shape = input_config.get("batch_input_shape") or input_config.get("batch_shape")
+        if not isinstance(batch_input_shape, list) or len(batch_input_shape) != 4:
+            raise ValueError(
+                "Unsupported v2.x archive: expected InputLayer batch_input_shape with rank 4."
+            )
+
+        keras = tf_module.keras
+        layers = keras.layers
+        inputs = keras.Input(
+            shape=tuple(batch_input_shape[1:]),
+            name=input_config.get("name", "logmel"),
+            dtype=input_config.get("dtype", "float32"),
+            sparse=bool(input_config.get("sparse", False)),
+            ragged=bool(input_config.get("ragged", False)),
+        )
+
+        x = inputs
+        supported_layer_types = {
+            "Conv2D": layers.Conv2D,
+            "BatchNormalization": layers.BatchNormalization,
+            "ReLU": layers.ReLU,
+            "MaxPooling2D": layers.MaxPooling2D,
+            "SpatialDropout2D": layers.SpatialDropout2D,
+            "GlobalAveragePooling2D": layers.GlobalAveragePooling2D,
+            "Dense": layers.Dense,
+            "Dropout": layers.Dropout,
+        }
+
+        for layer_entry in layers_config[1:]:
+            class_name = layer_entry.get("class_name")
+            if class_name not in supported_layer_types:
+                raise ValueError(f"Unsupported v2.x layer type in archive: {class_name}")
+
+            layer_kwargs = dict(layer_entry.get("config", {}))
+            layer_kwargs.pop("quantization_config", None)
+            layer_cls = supported_layer_types[class_name]
+            x = layer_cls(**layer_kwargs)(x)
+
+        model = keras.Model(inputs, x, name=model_config.get("name", "logmel_cnn_v2_x"))
+
+        weights_member = "model.weights.h5"
+        if weights_member not in src.namelist():
+            raise FileNotFoundError(f"Unsupported Keras archive: missing {weights_member}.")
+
+        with tempfile.TemporaryDirectory(prefix="melcnn-keras-weights-") as tmp_dir:
+            weights_path = Path(tmp_dir) / weights_member
+            weights_path.write_bytes(src.read(weights_member))
+            model.load_weights(str(weights_path))
+
+    return model
+
+
 def _register_cosine_schedule() -> None:
     """Register the custom LR schedule used during training."""
     import tensorflow as tf
 
-    @tf.keras.saving.register_keras_serializable(package="MelCNN")
+    register_keras_serializable = getattr(
+        getattr(tf.keras, "saving", None),
+        "register_keras_serializable",
+        tf.keras.utils.register_keras_serializable,
+    )
+
+    @register_keras_serializable(package="MelCNN")
     class CosineAnnealingWithWarmup(tf.keras.optimizers.schedules.LearningRateSchedule):
         def __init__(self, warmup_steps, total_steps, lr_max, lr_min):
             super().__init__()
@@ -75,6 +274,38 @@ def _register_cosine_schedule() -> None:
                 "lr_max": self.lr_max,
                 "lr_min": self.lr_min,
             }
+
+
+def _load_keras_model(tf_module, model_path: Path):
+    """Load a `.keras` model for inference with cross-version compatibility."""
+
+    _install_keras_module_aliases()
+    try:
+        return tf_module.keras.models.load_model(str(model_path), compile=False)
+    except (AttributeError, TypeError, ValueError, ModuleNotFoundError) as exc:
+        compat_exc = None
+        compat_path = _build_legacy_compatible_archive(model_path)
+        if compat_path is not None:
+            try:
+                return tf_module.keras.models.load_model(str(compat_path), compile=False)
+            except (AttributeError, TypeError, ValueError, ModuleNotFoundError) as retry_exc:
+                compat_exc = retry_exc
+
+        try:
+            return _load_v2x_model_from_archive(tf_module, model_path)
+        except Exception as rebuild_exc:
+            detail = compat_exc or exc
+            raise RuntimeError(
+                "Failed to load Keras model for inference. "
+                "The archive appears to have been saved by a newer Keras runtime, and both direct "
+                "deserialization and manual v2.x reconstruction failed. "
+                f"Direct load error: {detail}. Manual rebuild error: {rebuild_exc}"
+            ) from rebuild_exc
+
+        raise RuntimeError(
+            "Failed to load Keras model for inference. "
+            f"This usually means the model was saved with an incompatible Keras runtime: {exc}"
+        ) from exc
 
 
 @dataclass
@@ -221,19 +452,7 @@ class LogMelCNNV2XInference:
             )
 
         print(f"[LogMelCNNV2XInference] Loading model: {self.model_path.name}")
-        self.model = tf.keras.models.load_model(str(self.model_path))
-
-        stats_path = self.model_dir / "norm_stats.npz"
-        if not stats_path.exists():
-            raise FileNotFoundError(
-                f"Normalization stats not found: {stats_path}\n"
-                "Re-run the training script to generate norm_stats.npz."
-            )
-        data = np.load(str(stats_path), allow_pickle=True)
-        self.mu: np.ndarray = data["mu"]
-        self.std: np.ndarray = data["std"]
-        self.genre_classes: list[str] = [str(item) for item in data["genre_classes"].tolist()]
-        self.n_classes: int = len(self.genre_classes)
+        self.model = _load_keras_model(tf, self.model_path)
 
         self.run_report_path, self.run_report = self._load_run_report()
         feature_config = self._resolve_feature_config()
@@ -243,6 +462,16 @@ class LogMelCNNV2XInference:
         self.hop_length = int(feature_config["hop_length"])
         self.clip_duration = float(feature_config["clip_duration_sec"])
         self.logmel_shape = tuple(int(v) for v in feature_config["logmel_shape"])
+
+        self.stats_path = self.model_dir / "norm_stats.npz"
+        self.normalization_metadata_path = self.model_dir / "normalization_stats.json"
+        self.normalization = self._load_normalization_stats()
+        self.mu: np.ndarray = self.normalization["mu"]
+        self.std: np.ndarray = self.normalization["std"]
+        self.mean_per_bin: np.ndarray | None = self.normalization.get("mean_per_bin")
+        self.std_per_bin: np.ndarray | None = self.normalization.get("std_per_bin")
+        self.genre_classes: list[str] = self.normalization["genre_classes"]
+        self.n_classes: int = len(self.genre_classes)
 
         self._validate_feature_shape()
 
@@ -257,6 +486,72 @@ class LogMelCNNV2XInference:
         except Exception as exc:
             print(f"[WARN] Failed to read run report from {report_path}: {exc}", file=sys.stderr)
             return report_path, None
+
+    def _load_normalization_stats(self) -> dict[str, object]:
+        if not self.stats_path.exists():
+            raise FileNotFoundError(
+                f"Normalization stats not found: {self.stats_path}\n"
+                "Re-run the training script to generate norm_stats.npz."
+            )
+
+        data = np.load(str(self.stats_path), allow_pickle=True)
+        genre_classes = [str(item) for item in data["genre_classes"].tolist()]
+
+        normalization_info: dict[str, object] = {
+            "type": "legacy_mu_std",
+            "source": "norm_stats.npz",
+            "stats_path": str(self.stats_path),
+            "metadata_path": None,
+            "computed_from": None,
+            "epsilon": None,
+        }
+
+        if self.normalization_metadata_path.exists():
+            try:
+                metadata = json.loads(self.normalization_metadata_path.read_text())
+            except Exception as exc:
+                print(
+                    f"[WARN] Failed to read normalization metadata from {self.normalization_metadata_path}: {exc}",
+                    file=sys.stderr,
+                )
+            else:
+                if isinstance(metadata, dict):
+                    normalization_info.update(metadata)
+                    normalization_info["metadata_path"] = str(self.normalization_metadata_path)
+
+        if "mean_per_bin" in data and "std_per_bin" in data:
+            mean_per_bin = data["mean_per_bin"].astype(np.float32)
+            std_per_bin = data["std_per_bin"].astype(np.float32)
+            mu = mean_per_bin.reshape((1, mean_per_bin.shape[0], 1, 1)).astype(np.float32)
+            std = std_per_bin.reshape((1, std_per_bin.shape[0], 1, 1)).astype(np.float32)
+            normalization_info.setdefault("type", "train_only_per_mel_bin_standardization")
+            normalization_info["resolved_type"] = "per_mel_bin"
+            normalization_info["mean_per_bin_shape"] = list(mean_per_bin.shape)
+            normalization_info["std_per_bin_shape"] = list(std_per_bin.shape)
+            normalization_info["broadcast_mu_shape"] = list(mu.shape)
+            normalization_info["broadcast_std_shape"] = list(std.shape)
+            return {
+                "mu": mu,
+                "std": std,
+                "mean_per_bin": mean_per_bin,
+                "std_per_bin": std_per_bin,
+                "genre_classes": genre_classes,
+                "info": normalization_info,
+            }
+
+        mu = data["mu"].astype(np.float32)
+        std = data["std"].astype(np.float32)
+        normalization_info["resolved_type"] = "legacy_mu_std"
+        normalization_info["broadcast_mu_shape"] = list(mu.shape)
+        normalization_info["broadcast_std_shape"] = list(std.shape)
+        return {
+            "mu": mu,
+            "std": std,
+            "mean_per_bin": None,
+            "std_per_bin": None,
+            "genre_classes": genre_classes,
+            "info": normalization_info,
+        }
 
     def _resolve_feature_config(self) -> dict[str, object]:
         report_feature_config = None
@@ -316,6 +611,14 @@ class LogMelCNNV2XInference:
             raise ValueError(
                 f"std has unexpected shape {self.std.shape}; expected (1, {self.n_mels}, 1, 1)."
             )
+        if self.mean_per_bin is not None and self.mean_per_bin.shape != (self.n_mels,):
+            raise ValueError(
+                f"mean_per_bin has unexpected shape {self.mean_per_bin.shape}; expected ({self.n_mels},)."
+            )
+        if self.std_per_bin is not None and self.std_per_bin.shape != (self.n_mels,):
+            raise ValueError(
+                f"std_per_bin has unexpected shape {self.std_per_bin.shape}; expected ({self.n_mels},)."
+            )
 
     def extract_logmel(self, y: np.ndarray) -> np.ndarray:
         """Compute a fixed-shape log-mel spectrogram that matches the trained model."""
@@ -336,6 +639,10 @@ class LogMelCNNV2XInference:
         x = logmel[np.newaxis, ..., np.newaxis]
         x = ((x - self.mu) / self.std).astype(np.float32)
         return x
+
+    @property
+    def normalization_info(self) -> dict[str, object]:
+        return dict(self.normalization["info"])
 
     def _predict_logmel(self, logmel: np.ndarray) -> np.ndarray:
         x = self._normalize_logmel(logmel)

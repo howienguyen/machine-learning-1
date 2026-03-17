@@ -1175,7 +1175,14 @@ total_steps = EPOCHS * steps_per_epoch
 warmup_steps = WARMUP_EPOCHS * steps_per_epoch
 
 
-@tf.keras.saving.register_keras_serializable(package="MelCNN")
+register_keras_serializable = getattr(
+    getattr(tf.keras, "saving", None),
+    "register_keras_serializable",
+    tf.keras.utils.register_keras_serializable,
+)
+
+
+@register_keras_serializable(package="MelCNN")
 class CosineAnnealingWithWarmup(tf.keras.optimizers.schedules.LearningRateSchedule):
     def __init__(self, warmup_steps, total_steps, lr_max, lr_min):
         super().__init__()
