@@ -1,5 +1,5 @@
 # %% [markdown]
-# # Log-Mel CNN v2.4 TFRecord
+# # Log-Mel CNN v2.4.1 TFRecord
 #
 # TFRecord-input upgrade of `logmel_cnn_v2_3_cuda.py` that keeps the same
 # backbone, staged training, and normalization recipe while replacing the
@@ -51,11 +51,11 @@
 # python MelCNN-MGR/preprocessing/1_build_all_datasets_and_samples_v1_1.py --mode stage2
 # python MelCNN-MGR/preprocessing/2_build_log_mel_dataset.py
 # python MelCNN-MGR/preprocessing/3_convert_npy_2_tfrecord.py
-# python MelCNN-MGR/model_training/logmel_cnn_v2_4_cuda_tf.py
+# python MelCNN-MGR/model_training/logmel_cnn_v2_4_1_cuda_tf.py
 #
 # Warm-start usage example:
-# python MelCNN-MGR/model_training/logmel_cnn_v2_4_cuda_tf.py --pretrained-model MelCNN-MGR/models/logmel-cnn-demo/best_model_macro_f1.keras
-# python MelCNN-MGR/model_training/logmel_cnn_v2_4_cuda_tf.py --pretrained-model MelCNN-MGR/models/logmel-cnn-demo/best_model_macro_f1.keras --pretrained-mode backbone_only --freeze-backbone-epochs 3
+# python MelCNN-MGR/model_training/logmel_cnn_v2_4_1_cuda_tf.py --pretrained-model MelCNN-MGR/models/logmel-cnn-demo/best_model_macro_f1.keras
+# python MelCNN-MGR/model_training/logmel_cnn_v2_4_1_cuda_tf.py --pretrained-model MelCNN-MGR/models/logmel-cnn-demo/best_model_macro_f1.keras --pretrained-mode backbone_only --freeze-backbone-epochs 3
 
 # %% [markdown]
 # ## 1. Imports
@@ -173,7 +173,7 @@ print(f"Precision  : {keras.mixed_precision.global_policy().name}")
 
 
 CLI_PARSER = argparse.ArgumentParser(
-    description="Train Log-Mel CNN v2.4 TFRecord with train-only per-mel-bin standardization and gap-aware early stopping from scratch or warm-start from an existing .keras checkpoint.",
+    description="Train Log-Mel CNN v2.4.1 TFRecord with train-only per-mel-bin standardization and gap-aware early stopping from scratch or warm-start from an existing .keras checkpoint.",
 )
 CLI_PARSER.add_argument(
     "--pretrained-model",
@@ -277,9 +277,29 @@ FINAL_DROPOUT_RATE = 0.20           # v2.1: 0.20 (was v2: 0.25) — wider bottle
 NORMALIZATION_EPS = 1e-6
 NORMALIZATION_STRATEGY = "train_only_per_mel_bin_standardization"
 ENABLE_TRAIN_EVAL_METRICS = False   # extra full clean-train evaluation each epoch; expensive, so disabled by default
-DATASET_NUM_PARALLEL_CALLS = 3      # fixed tf.data map parallelism; avoids AUTOTUNE-side buffer growth
-DATASET_PREFETCH_BUFFER_SIZE = 3    # fixed single-batch prefetch; avoids prefetch autotuner RAM expansion
-DATASET_NUM_PARALLEL_READS = 3      # fixed TFRecord shard read parallelism; avoids AUTOTUNE-side reader growth
+DATASET_PARALLELISM_MODE = "autotune"  # "fixed", set to "autotune" to let tf.data tune map/read parallelism dynamically
+DATASET_FIXED_NUM_PARALLEL_CALLS = 3
+DATASET_FIXED_NUM_PARALLEL_READS = 3
+DATASET_PREFETCH_BUFFER_SIZE = tf.data.AUTOTUNE    # allow tf.data to tune prefetch depth dynamically
+
+
+def _resolve_dataset_parallelism(mode: str) -> tuple[object, object, bool]:
+    normalized_mode = mode.strip().lower()
+    if normalized_mode == "fixed":
+        return DATASET_FIXED_NUM_PARALLEL_CALLS, DATASET_FIXED_NUM_PARALLEL_READS, False
+    if normalized_mode == "autotune":
+        return tf.data.AUTOTUNE, tf.data.AUTOTUNE, True
+    raise ValueError(f"Unsupported DATASET_PARALLELISM_MODE: {mode!r}")
+
+
+DATASET_NUM_PARALLEL_CALLS, DATASET_NUM_PARALLEL_READS, DATASET_AUTOTUNE_ENABLED = _resolve_dataset_parallelism(
+    DATASET_PARALLELISM_MODE
+)
+print(
+    "[Dataset] parallelism_mode="
+    f"{DATASET_PARALLELISM_MODE} | num_parallel_calls={DATASET_NUM_PARALLEL_CALLS} "
+    f"| num_parallel_reads={DATASET_NUM_PARALLEL_READS} | prefetch={DATASET_PREFETCH_BUFFER_SIZE}"
+)
 
 STANDARD_EARLY_STOP_PATIENCE = 9
 STANDARD_EARLY_STOP_MIN_DELTA = 0.002
@@ -1010,7 +1030,7 @@ def build_model(n_classes: int) -> keras.Model:
     x = layers.Dense(256, activation="relu", name="fc_bottleneck")(x)
     x = layers.Dropout(FINAL_DROPOUT_RATE, name="dropout")(x)
     outputs = layers.Dense(n_classes, activation="softmax", dtype="float32", name="fc_out")(x)
-    return keras.Model(inputs, outputs, name="logmel_cnn_v2_4_cuda_tf")
+    return keras.Model(inputs, outputs, name="logmel_cnn_v2_4_1_cuda_tf")
 
 
 @tf.keras.utils.register_keras_serializable(package="MelCNN")
@@ -1684,7 +1704,7 @@ print(f"Best epoch by macro_F1 : {best_f1_epoch + 1}/{num_epochs}  (val_macro_f1
 _section_times["8. Compile & train"] = time.perf_counter() - _t0
 print(f"\nCompile & train : {_section_times['8. Compile & train']:.1f}s")
 
-model_path = RUN_DIR / "logmel_cnn_v2_4_cuda_tf.keras"
+model_path = RUN_DIR / "logmel_cnn_v2_4_1_cuda_tf.keras"
 model.save(str(model_path))
 np.savez(
     str(RUN_DIR / "norm_stats.npz"),
@@ -1847,7 +1867,7 @@ cm = confusion_matrix(y_test_true, y_test_pred, labels=np.arange(N_CLASSES))
 fig, ax = plt.subplots(figsize=(13, 11))
 disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=GENRE_CLASSES)
 disp.plot(ax=ax, xticks_rotation=45, colorbar=True, cmap="Blues", values_format="d")
-ax.set_title("Confusion matrix — test set (logmel_cnn_v2_4_cuda_tf)")
+ax.set_title("Confusion matrix — test set (logmel_cnn_v2_4_1_cuda_tf)")
 plt.tight_layout()
 plt.show()
 
@@ -2010,7 +2030,8 @@ report = {
         "best_epoch_macro_f1": best_f1_epoch + 1,
         "train_eval_metrics_enabled": ENABLE_TRAIN_EVAL_METRICS,
         "gap_aware_early_stopping_enabled": ENABLE_TRAIN_EVAL_METRICS,
-        "dataset_autotune_enabled": False,
+        "dataset_parallelism_mode": DATASET_PARALLELISM_MODE,
+        "dataset_autotune_enabled": DATASET_AUTOTUNE_ENABLED,
         "dataset_num_parallel_calls": DATASET_NUM_PARALLEL_CALLS,
         "dataset_num_parallel_reads": DATASET_NUM_PARALLEL_READS,
         "dataset_prefetch_buffer_size": DATASET_PREFETCH_BUFFER_SIZE,
@@ -2043,7 +2064,7 @@ report = {
     },
 }
 
-report_path = RUN_DIR / "run_report_logmel_cnn_v2_4_cuda_tf.json"
+report_path = RUN_DIR / "run_report_logmel_cnn_v2_4_1_cuda_tf.json"
 report_path.write_text(json.dumps(report, indent=2))
 print(f"Run report -> {report_path}")
 
