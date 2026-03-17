@@ -277,10 +277,12 @@ FINAL_DROPOUT_RATE = 0.20           # v2.1: 0.20 (was v2: 0.25) — wider bottle
 NORMALIZATION_EPS = 1e-6
 NORMALIZATION_STRATEGY = "train_only_per_mel_bin_standardization"
 ENABLE_TRAIN_EVAL_METRICS = False   # extra full clean-train evaluation each epoch; expensive, so disabled by default
-DATASET_PARALLELISM_MODE = "autotune"  # "fixed", set to "autotune" to let tf.data tune map/read parallelism dynamically
-DATASET_FIXED_NUM_PARALLEL_CALLS = 3
-DATASET_FIXED_NUM_PARALLEL_READS = 3
-DATASET_PREFETCH_BUFFER_SIZE = tf.data.AUTOTUNE    # allow tf.data to tune prefetch depth dynamically
+DATASET_PARALLELISM_MODE = "fixed"  # safe default; set to "autotune" only for experiments, as it may be unstable on some TF/CUDA runs
+DATASET_FIXED_NUM_PARALLEL_CALLS = 6
+DATASET_FIXED_NUM_PARALLEL_READS = 6
+DATASET_PREFETCH_MODE = "autotune"  # "fixed" uses DATASET_FIXED_PREFETCH_BUFFER_SIZE; "autotune" uses tf.data.AUTOTUNE
+DATASET_FIXED_PREFETCH_BUFFER_SIZE = 1
+DATASET_AUTOTUNE_RAM_BUDGET_BYTES = 2 * 1024 * 1024 * 1024  # default 2 GiB tf.data autotune budget; set to None to use TensorFlow's default budget
 
 
 def _resolve_dataset_parallelism(mode: str) -> tuple[object, object, bool]:
@@ -292,14 +294,29 @@ def _resolve_dataset_parallelism(mode: str) -> tuple[object, object, bool]:
     raise ValueError(f"Unsupported DATASET_PARALLELISM_MODE: {mode!r}")
 
 
+def _resolve_dataset_prefetch(mode: str) -> tuple[object, bool]:
+    normalized_mode = mode.strip().lower()
+    if normalized_mode == "fixed":
+        return DATASET_FIXED_PREFETCH_BUFFER_SIZE, False
+    if normalized_mode == "autotune":
+        return tf.data.AUTOTUNE, True
+    raise ValueError(f"Unsupported DATASET_PREFETCH_MODE: {mode!r}")
+
+
 DATASET_NUM_PARALLEL_CALLS, DATASET_NUM_PARALLEL_READS, DATASET_AUTOTUNE_ENABLED = _resolve_dataset_parallelism(
     DATASET_PARALLELISM_MODE
 )
+DATASET_PREFETCH_BUFFER_SIZE, DATASET_PREFETCH_AUTOTUNE_ENABLED = _resolve_dataset_prefetch(DATASET_PREFETCH_MODE)
 print(
     "[Dataset] parallelism_mode="
     f"{DATASET_PARALLELISM_MODE} | num_parallel_calls={DATASET_NUM_PARALLEL_CALLS} "
-    f"| num_parallel_reads={DATASET_NUM_PARALLEL_READS} | prefetch={DATASET_PREFETCH_BUFFER_SIZE}"
+    f"| num_parallel_reads={DATASET_NUM_PARALLEL_READS} | prefetch_mode={DATASET_PREFETCH_MODE} "
+    f"| prefetch={DATASET_PREFETCH_BUFFER_SIZE} | autotune_ram_budget_bytes={DATASET_AUTOTUNE_RAM_BUDGET_BYTES}"
 )
+if DATASET_AUTOTUNE_ENABLED:
+    print("[Dataset][WARN] AUTOTUNE mode is experimental in this trainer and may be unstable on some TensorFlow/CUDA combinations.")
+if DATASET_PREFETCH_AUTOTUNE_ENABLED and DATASET_AUTOTUNE_RAM_BUDGET_BYTES is not None:
+    print(f"[Dataset] tf.data autotune RAM budget set to {int(DATASET_AUTOTUNE_RAM_BUDGET_BYTES):,} bytes")
 
 STANDARD_EARLY_STOP_PATIENCE = 9
 STANDARD_EARLY_STOP_MIN_DELTA = 0.002
@@ -406,6 +423,8 @@ RUNTIME_DEVICE, BACKEND, ACCEL_NAMES, SMOKE_INFO = configure_runtime_device(tf)
 print(f"Backend    : {BACKEND.upper()} ({RUNTIME_DEVICE})")
 print(f"Devices    : {ACCEL_NAMES if ACCEL_NAMES else 'none detected -> CPU fallback'}")
 print(f"Smoke test : {SMOKE_INFO}")
+if DATASET_AUTOTUNE_ENABLED and BACKEND == "cuda":
+    print("[Dataset][WARN] AUTOTUNE + CUDA triggered an EventMgr crash in prior runs on this stack; use fixed mode if training aborts during dataset iteration.")
 
 _section_times["3. Device setup"] = time.perf_counter() - _t0
 print(f"\nDevice setup : {_section_times['3. Device setup']:.2f}s")
@@ -905,6 +924,14 @@ def make_dataset(
 ) -> tf.data.Dataset:
     sample_count = len(index_df)
     ds = _build_record_dataset_from_shards(shard_df, shuffle_files=shuffle)
+
+    if DATASET_AUTOTUNE_ENABLED or DATASET_PREFETCH_AUTOTUNE_ENABLED or DATASET_AUTOTUNE_RAM_BUDGET_BYTES is not None:
+        options = tf.data.Options()
+        options.autotune.enabled = True
+        if DATASET_AUTOTUNE_RAM_BUDGET_BYTES is not None:
+            options.autotune.ram_budget = int(DATASET_AUTOTUNE_RAM_BUDGET_BYTES)
+        ds = ds.with_options(options)
+
     if shuffle:
         ds = ds.shuffle(buffer_size=min(sample_count, 10000), seed=SEED, reshuffle_each_iteration=True)
 
@@ -2034,7 +2061,10 @@ report = {
         "dataset_autotune_enabled": DATASET_AUTOTUNE_ENABLED,
         "dataset_num_parallel_calls": DATASET_NUM_PARALLEL_CALLS,
         "dataset_num_parallel_reads": DATASET_NUM_PARALLEL_READS,
+        "dataset_prefetch_mode": DATASET_PREFETCH_MODE,
+        "dataset_prefetch_autotune_enabled": DATASET_PREFETCH_AUTOTUNE_ENABLED,
         "dataset_prefetch_buffer_size": DATASET_PREFETCH_BUFFER_SIZE,
+        "dataset_autotune_ram_budget_bytes": DATASET_AUTOTUNE_RAM_BUDGET_BYTES,
         "train_eval_accuracy_per_epoch": train_eval_accuracy_history,
         "train_eval_macro_f1_per_epoch": train_eval_f1_history,
         "lr_per_epoch": lr_logger.lrs,
