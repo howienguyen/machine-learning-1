@@ -61,7 +61,8 @@ from model_inference.inference_logmel_cnn_v2_x import (
 
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8000
-DEFAULT_MODEL_DIR = (MELCNN_DIR / "demo-models" / "logmel-cnn-v2_2-20260316-145637-bolero").resolve()
+MODEL_NAME = "logmel-cnn-v2_4-cuda-tf-20260317-151350"
+DEFAULT_MODEL_DIR = (MELCNN_DIR / "demo-models" / MODEL_NAME).resolve()
 STREAM_PATH = "/ws/stream"
 LOGGER = logging.getLogger("melcnn.inference_web_service")
 DEFAULT_WS_PING_INTERVAL = 20.0

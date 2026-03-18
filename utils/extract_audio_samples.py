@@ -100,7 +100,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-num-segments",
         type=int,
-        default=300,
+        default=360,
         help=(
             "Maximum number of segments to extract from a single file. "
             "Files longer than min-duration-seconds but <= 30s use 1 segment; "

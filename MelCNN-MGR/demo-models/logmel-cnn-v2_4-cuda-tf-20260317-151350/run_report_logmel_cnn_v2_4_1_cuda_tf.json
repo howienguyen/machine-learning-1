@@ -1,0 +1,591 @@
+{
+  "run_id": "logmel-cnn-v2_4-cuda-tf-20260317-151350",
+  "generated_at": "2026-03-17 20:56:47",
+  "initialization": {
+    "mode": "scratch",
+    "pretrained_model": null,
+    "pretrained_mode": null
+  },
+  "warm_start_comparison": {
+    "enabled": false,
+    "mode": null,
+    "source_checkpoint": null,
+    "source_run_report": null,
+    "source_run_id": null,
+    "source_genre_classes": null,
+    "class_set_matches_current": false,
+    "head_reset_intentional": false,
+    "transfer_summary": null
+  },
+  "artifacts": {
+    "console_log": "/mnt/d/mse/nguyen_sy_hung_codebases/machine-learning-1/MelCNN-MGR/models/logmel-cnn-v2_4-cuda-tf-20260317-151350/console_output.txt"
+  },
+  "tfrecord_dataset_dir": "/home/hsnguyen/model-training-data-cache/logmel_dataset_15s_tfrecord",
+  "source_logmel_root": "/home/hsnguyen/model-training-data-cache/logmel_dataset_15s",
+  "manifests": {
+    "train": "/home/hsnguyen/model-training-data-cache/logmel_dataset_15s_tfrecord/tfrecord_manifest_train.parquet",
+    "val": "/home/hsnguyen/model-training-data-cache/logmel_dataset_15s_tfrecord/tfrecord_manifest_val.parquet",
+    "test": "/home/hsnguyen/model-training-data-cache/logmel_dataset_15s_tfrecord/tfrecord_manifest_test.parquet",
+    "train_shards": "/home/hsnguyen/model-training-data-cache/logmel_dataset_15s_tfrecord/tfrecord_shards_train.parquet",
+    "val_shards": "/home/hsnguyen/model-training-data-cache/logmel_dataset_15s_tfrecord/tfrecord_shards_val.parquet",
+    "test_shards": "/home/hsnguyen/model-training-data-cache/logmel_dataset_15s_tfrecord/tfrecord_shards_test.parquet"
+  },
+  "feature_config": {
+    "sample_rate": 22050,
+    "n_mels": 192,
+    "n_fft": 512,
+    "hop_length": 256,
+    "clip_duration_sec": 15.0,
+    "logmel_shape": [
+      192,
+      1291
+    ]
+  },
+  "dataset": {
+    "format": "tfrecord",
+    "compression": "none",
+    "n_classes": 10,
+    "genres": [
+      "Blues",
+      "Bolero",
+      "Classical",
+      "Country",
+      "Hip-Hop",
+      "Jazz",
+      "Metal",
+      "Pop",
+      "Rock",
+      "Speech"
+    ],
+    "train_samples": 13107,
+    "val_samples": 2811,
+    "test_samples": 2810,
+    "train_shards": 13,
+    "val_shards": 3,
+    "test_shards": 3
+  },
+  "normalization": {
+    "type": "train_only_per_mel_bin_standardization",
+    "computed_from": "train_split_only",
+    "epsilon": 1e-06,
+    "stats_artifact": "/mnt/d/mse/nguyen_sy_hung_codebases/machine-learning-1/MelCNN-MGR/models/logmel-cnn-v2_4-cuda-tf-20260317-151350/norm_stats.npz",
+    "metadata_artifact": "/mnt/d/mse/nguyen_sy_hung_codebases/machine-learning-1/MelCNN-MGR/models/logmel-cnn-v2_4-cuda-tf-20260317-151350/normalization_stats.json",
+    "mean_per_bin_shape": [
+      192
+    ],
+    "std_per_bin_shape": [
+      192
+    ],
+    "mean_per_bin_range": [
+      0.0,
+      1.836942
+    ],
+    "std_per_bin_range": [
+      1e-06,
+      1.663179
+    ]
+  },
+  "training": {
+    "epochs_max": 136,
+    "epochs_actual": 107,
+    "batch_size": 48,
+    "optimizer_state_preserved_between_stages": true,
+    "standard_early_stopping": {
+      "monitor": "val_macro_f1",
+      "patience": 9,
+      "min_delta": 0.002,
+      "start_from_epoch": 66,
+      "restore_best_weights": true
+    },
+    "gap_aware_early_stopping": {
+      "gap_threshold": 0.1,
+      "patience": 9,
+      "min_delta": 0.001,
+      "require_val_not_improving": true,
+      "val_macro_f1_min_threshold": 0.8,
+      "start_epoch": 60,
+      "restore_best_weights": true
+    },
+    "freeze_backbone_epochs_requested": 0,
+    "freeze_backbone_epochs_applied": 0,
+    "training_stages": [
+      {
+        "name": "full_finetune",
+        "backbone_trainable": true,
+        "epochs_requested": 136,
+        "epochs_completed": 107,
+        "initial_epoch": 0,
+        "final_epoch": 107,
+        "gap_aware_early_stopping": null
+      }
+    ],
+    "label_smoothing": 0.05,
+    "weight_decay": 0.0001,
+    "mixup_alpha": 0.3,
+    "spec_aug_freq_mask": 24,
+    "spec_aug_time_mask": 40,
+    "class_weights_enabled": true,
+    "class_weight_balance_ratio": 1.2271,
+    "max_class_weight": 1.5,
+    "disable_spatial_dropout": false,
+    "spatial_dropout_block2": 0.05,
+    "spatial_dropout_block3": 0.1,
+    "spatial_dropout_block4": 0.15,
+    "spatial_dropout_block5": 0.2,
+    "final_dropout": 0.2,
+    "warmup_epochs": 5,
+    "lr_max": 0.0005,
+    "best_epoch_val_loss": 103,
+    "best_epoch_macro_f1": 98,
+    "train_eval_metrics_enabled": false,
+    "gap_aware_early_stopping_enabled": false,
+    "dataset_parallelism_mode": "fixed",
+    "dataset_autotune_enabled": false,
+    "dataset_num_parallel_calls": 6,
+    "dataset_num_parallel_reads": 6,
+    "dataset_prefetch_mode": "autotune",
+    "dataset_prefetch_autotune_enabled": true,
+    "dataset_prefetch_buffer_size": -1,
+    "dataset_autotune_ram_budget_bytes": 2147483648,
+    "train_eval_accuracy_per_epoch": [],
+    "train_eval_macro_f1_per_epoch": [],
+    "lr_per_epoch": [
+      0.00010080000356538221,
+      0.00020059999951627105,
+      0.00030040001729503274,
+      0.0004002000205218792,
+      0.0005000000237487257,
+      0.0004999283119104803,
+      0.0004997131181880832,
+      0.0004993546172045171,
+      0.0004988529835827649,
+      0.000498208508361131,
+      0.0004974215989932418,
+      0.0004964927211403847,
+      0.0004954223404638469,
+      0.0004942111554555595,
+      0.0004928597481921315,
+      0.0004913689917884767,
+      0.0004897397011518478,
+      0.00048797283670865,
+      0.00048606941709294915,
+      0.00048403049004264176,
+      0.00048185730702243745,
+      0.00047955100308172405,
+      0.00047711306251585484,
+      0.000474544707685709,
+      0.0004718475975096226,
+      0.00046902315807528794,
+      0.00046607301919721067,
+      0.00046299895620904863,
+      0.00045980262802913785,
+      0.0004564859555102885,
+      0.0004530508304014802,
+      0.0004494992026593536,
+      0.0004458331677597016,
+      0.0004420547920744866,
+      0.0004381662292871624,
+      0.00043416974949650466,
+      0.00043006762280128896,
+      0.0004258622648194432,
+      0.00042155603296123445,
+      0.0004171514301560819,
+      0.0004126510175410658,
+      0.0004080573271494359,
+      0.00040337303653359413,
+      0.00039860085234977305,
+      0.00039374345215037465,
+      0.0003888036881107837,
+      0.0003837843833025545,
+      0.0003786884481087327,
+      0.00037351876380853355,
+      0.000368278386304155,
+      0.0003629702259786427,
+      0.00035759739694185555,
+      0.00035216298419982195,
+      0.0003466701309662312,
+      0.0003411219222471118,
+      0.00033552158856764436,
+      0.00032987238955684006,
+      0.0003241775557398796,
+      0.0003184403176419437,
+      0.00031266402220353484,
+      0.0003068519872613251,
+      0.00030100755975581706,
+      0.0002951340575236827,
+      0.000289234914816916,
+      0.00028331344947218895,
+      0.0002773731539491564,
+      0.0002714173460844904,
+      0.0002654495765455067,
+      0.0002594732213765383,
+      0.0002534916275180876,
+      0.00024750837474130094,
+      0.0002415267808828503,
+      0.00023555041116196662,
+      0.0002295826270710677,
+      0.00022362683375831693,
+      0.00021768652368336916,
+      0.00021176513109821826,
+      0.0002058659156318754,
+      0.00019999242795165628,
+      0.00019414800044614822,
+      0.00018833595095202327,
+      0.00018255967006552964,
+      0.00017682247562333941,
+      0.00017112759815063328,
+      0.0001654784136917442,
+      0.00015987813821993768,
+      0.0001543299003969878,
+      0.0001488370035076514,
+      0.00014340263442136347,
+      0.00013802977628074586,
+      0.0001327216305071488,
+      0.00012748116569127887,
+      0.0001223115250468254,
+      0.00011721558257704601,
+      0.00011219630687264726,
+      0.00010725656466092914,
+      0.00010239918628940359,
+      9.762694389792159e-05,
+      9.294265328207985e-05,
+      8.834898471832275e-05,
+      8.384855027543381e-05,
+      7.944398385006934e-05,
+      7.513777381973341e-05,
+      7.093237218214199e-05,
+      6.683027459075674e-05,
+      6.28338020760566e-05,
+      5.894522473681718e-05
+    ],
+    "seconds_per_epoch": [
+      186.864,
+      131.267,
+      144.653,
+      142.17,
+      172.456,
+      179.625,
+      201.401,
+      191.401,
+      196.356,
+      232.272,
+      200.205,
+      194.996,
+      201.506,
+      207.161,
+      211.259,
+      209.407,
+      189.906,
+      197.77,
+      198.055,
+      226.308,
+      190.75,
+      207.915,
+      196.504,
+      213.339,
+      187.67,
+      201.009,
+      202.847,
+      201.244,
+      206.823,
+      194.292,
+      205.728,
+      197.94,
+      195.465,
+      199.992,
+      205.197,
+      206.611,
+      192.432,
+      199.45,
+      197.767,
+      196.688,
+      206.563,
+      194.67,
+      208.969,
+      191.49,
+      198.744,
+      203.481,
+      204.089,
+      206.412,
+      188.284,
+      211.276,
+      198.312,
+      198.288,
+      199.751,
+      199.759,
+      207.741,
+      220.394,
+      236.517,
+      198.966,
+      211.173,
+      239.551,
+      212.873,
+      204.621,
+      227.204,
+      211.429,
+      203.593,
+      204.568,
+      190.821,
+      197.735,
+      206.3,
+      195.052,
+      214.67,
+      194.324,
+      210.418,
+      210.454,
+      181.05,
+      197.867,
+      198.098,
+      205.595,
+      200.966,
+      199.233,
+      197.592,
+      200.041,
+      188.224,
+      206.688,
+      200.639,
+      229.528,
+      232.147,
+      230.031,
+      210.805,
+      204.551,
+      188.495,
+      212.64,
+      226.213,
+      227.189,
+      185.925,
+      207.961,
+      231.708,
+      212.881,
+      224.329,
+      221.23,
+      216.386,
+      199.677,
+      214.134,
+      233.381,
+      196.89,
+      207.836,
+      205.158
+    ]
+  },
+  "evaluation": {
+    "train": {
+      "cost": 0.4574,
+      "accuracy": 0.9522,
+      "macro_f1": 0.9527,
+      "per_genre": {
+        "Blues": {
+          "precision": 0.9614,
+          "recall": 0.9122,
+          "f1-score": 0.9362,
+          "support": 1367.0
+        },
+        "Bolero": {
+          "precision": 0.9993,
+          "recall": 0.9912,
+          "f1-score": 0.9952,
+          "support": 1365.0
+        },
+        "Classical": {
+          "precision": 0.8855,
+          "recall": 0.9793,
+          "f1-score": 0.9301,
+          "support": 1351.0
+        },
+        "Country": {
+          "precision": 0.9411,
+          "recall": 0.9668,
+          "f1-score": 0.9538,
+          "support": 1206.0
+        },
+        "Hip-Hop": {
+          "precision": 0.9686,
+          "recall": 0.9714,
+          "f1-score": 0.97,
+          "support": 1364.0
+        },
+        "Jazz": {
+          "precision": 0.9551,
+          "recall": 0.9162,
+          "f1-score": 0.9352,
+          "support": 1324.0
+        },
+        "Metal": {
+          "precision": 0.9902,
+          "recall": 0.9699,
+          "f1-score": 0.9799,
+          "support": 1360.0
+        },
+        "Pop": {
+          "precision": 0.925,
+          "recall": 0.9059,
+          "f1-score": 0.9153,
+          "support": 1307.0
+        },
+        "Rock": {
+          "precision": 0.9266,
+          "recall": 0.917,
+          "f1-score": 0.9218,
+          "support": 1349.0
+        },
+        "Speech": {
+          "precision": 0.9789,
+          "recall": 1.0,
+          "f1-score": 0.9893,
+          "support": 1114.0
+        }
+      }
+    },
+    "validation": {
+      "cost": 0.7441,
+      "accuracy": 0.8399,
+      "macro_f1": 0.8406,
+      "per_genre": {
+        "Blues": {
+          "precision": 0.7732,
+          "recall": 0.7051,
+          "f1-score": 0.7376,
+          "support": 295.0
+        },
+        "Bolero": {
+          "precision": 0.986,
+          "recall": 0.9724,
+          "f1-score": 0.9792,
+          "support": 290.0
+        },
+        "Classical": {
+          "precision": 0.8242,
+          "recall": 0.951,
+          "f1-score": 0.8831,
+          "support": 286.0
+        },
+        "Country": {
+          "precision": 0.7017,
+          "recall": 0.8054,
+          "f1-score": 0.75,
+          "support": 257.0
+        },
+        "Hip-Hop": {
+          "precision": 0.8704,
+          "recall": 0.8942,
+          "f1-score": 0.8822,
+          "support": 293.0
+        },
+        "Jazz": {
+          "precision": 0.8524,
+          "recall": 0.7938,
+          "f1-score": 0.8221,
+          "support": 291.0
+        },
+        "Metal": {
+          "precision": 0.9819,
+          "recall": 0.9345,
+          "f1-score": 0.9576,
+          "support": 290.0
+        },
+        "Pop": {
+          "precision": 0.6742,
+          "recall": 0.638,
+          "f1-score": 0.6556,
+          "support": 279.0
+        },
+        "Rock": {
+          "precision": 0.7722,
+          "recall": 0.7356,
+          "f1-score": 0.7535,
+          "support": 295.0
+        },
+        "Speech": {
+          "precision": 0.979,
+          "recall": 0.9915,
+          "f1-score": 0.9852,
+          "support": 235.0
+        }
+      }
+    },
+    "test": {
+      "cost": 0.7144,
+      "accuracy": 0.8484,
+      "macro_f1": 0.8468,
+      "per_genre": {
+        "Blues": {
+          "precision": 0.7798,
+          "recall": 0.7347,
+          "f1-score": 0.7566,
+          "support": 294.0
+        },
+        "Bolero": {
+          "precision": 0.9897,
+          "recall": 0.9829,
+          "f1-score": 0.9863,
+          "support": 293.0
+        },
+        "Classical": {
+          "precision": 0.7994,
+          "recall": 0.9863,
+          "f1-score": 0.8831,
+          "support": 291.0
+        },
+        "Country": {
+          "precision": 0.7214,
+          "recall": 0.786,
+          "f1-score": 0.7523,
+          "support": 257.0
+        },
+        "Hip-Hop": {
+          "precision": 0.901,
+          "recall": 0.8949,
+          "f1-score": 0.898,
+          "support": 295.0
+        },
+        "Jazz": {
+          "precision": 0.8492,
+          "recall": 0.7509,
+          "f1-score": 0.797,
+          "support": 285.0
+        },
+        "Metal": {
+          "precision": 0.9692,
+          "recall": 0.9561,
+          "f1-score": 0.9626,
+          "support": 296.0
+        },
+        "Pop": {
+          "precision": 0.7438,
+          "recall": 0.6498,
+          "f1-score": 0.6936,
+          "support": 277.0
+        },
+        "Rock": {
+          "precision": 0.7662,
+          "recall": 0.7474,
+          "f1-score": 0.7567,
+          "support": 285.0
+        },
+        "Speech": {
+          "precision": 0.9634,
+          "recall": 1.0,
+          "f1-score": 0.9814,
+          "support": 237.0
+        }
+      }
+    }
+  },
+  "changes_from_v2_1": {
+    "weight_decay": "1e-4 (was 5e-4) \u2014 lighter L2 with Mixup+dropout active",
+    "spec_aug_num_masks": "1 (was 2) \u2014 avoid overmasking combined with Mixup",
+    "spatial_dropout": "graduated 0.05/0.10/0.15/0.20 (was flat 0.10) \u2014 deeper layers get more regularization",
+    "bottleneck_units": "256 (was 128) \u2014 preserve full backbone feature space",
+    "final_dropout": "0.20 (was 0.25) \u2014 wider bottleneck absorbs capacity",
+    "gradient_clipping": "clipnorm=1.0 added to AdamW",
+    "class_weight_mixup": "pre-Mixup anchor-based weighting (was post-Mixup blended weighting)",
+    "gap_aware_early_stopping": "Added macro-F1 gap stopping with threshold=0.13, patience=6, val-not-improving required, val_macro_f1 floor=0.70, start_epoch=60",
+    "restore_best_weights": "Enabled for standard and gap-aware early stopping so the final in-memory model snaps back to the best validation epoch"
+  },
+  "changes_from_v2_2": {
+    "normalization": "Train-only per-mel-bin standardization is now explicit, two-pass, and saved as mean_per_bin/std_per_bin artifacts."
+  },
+  "changes_from_v2_3": {
+    "input_pipeline": "Training and evaluation now consume shard-based TFRecords from 3_convert_npy_2_tfrecord.py instead of per-sample npy loads."
+  }
+}
