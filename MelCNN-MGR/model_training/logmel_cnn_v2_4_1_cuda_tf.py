@@ -281,8 +281,8 @@ DATASET_PARALLELISM_MODE = "fixed"  # safe default; set to "autotune" only for e
 DATASET_FIXED_NUM_PARALLEL_CALLS = 6
 DATASET_FIXED_NUM_PARALLEL_READS = 6
 DATASET_PREFETCH_MODE = "autotune"  # "fixed" uses DATASET_FIXED_PREFETCH_BUFFER_SIZE; "autotune" uses tf.data.AUTOTUNE
-DATASET_FIXED_PREFETCH_BUFFER_SIZE = 1
-DATASET_AUTOTUNE_RAM_BUDGET_BYTES = 2 * 1024 * 1024 * 1024  # default 2 GiB tf.data autotune budget; set to None to use TensorFlow's default budget
+DATASET_FIXED_PREFETCH_BUFFER_SIZE = 3
+DATASET_AUTOTUNE_RAM_BUDGET_BYTES = 2 * 1024 * 1024 * 1024 * 1.5  # default 2 * 1.5 GiB tf.data autotune budget; set to None to use TensorFlow's default budget
 
 
 def _resolve_dataset_parallelism(mode: str) -> tuple[object, object, bool]:
