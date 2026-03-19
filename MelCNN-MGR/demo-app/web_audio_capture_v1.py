@@ -1603,8 +1603,20 @@ def index():
                     audio {
                         width: min(560px, 100%);
                         border-radius: 10px;
-                        border: 1px solid var(--border);
-                        background: linear-gradient(180deg, rgba(50, 70, 95, 0.34), rgba(20, 28, 40, 0.55));
+                        border: none;
+                        background: transparent;
+                        box-shadow: none;
+                        color-scheme: dark;
+                        accent-color: var(--cyan);
+                    }
+
+                    audio::-webkit-media-controls-panel {
+                        background: linear-gradient(180deg, rgba(22, 28, 36, 0.96), rgba(12, 17, 24, 0.98));
+                    }
+
+                    audio::-webkit-media-controls-enclosure {
+                        border-radius: 10px;
+                        background: transparent;
                     }
 
                     .meter {
@@ -1815,8 +1827,8 @@ def index():
                         <div class="hero-card-grid">
                             <div class="hero-card-copy">
                                 <div style="font-size: 16px; font-weight: 700; letter-spacing: 0.1px; line-height: 1.05;">🎧𝄞✮˚.⋆ Final Project: Music Genre Prediction using Lol-Mel & CNN ♬⋆.˚</div>
-                                <div style="color: var(--muted); font-size: 14px; margin-top: 3px;"><strong>By Nguyen Sy Hung, 2026</strong></div>
-                                <div style="color: var(--muted); font-size: 14px; margin-top: 3px;"><strong>Machine Learning 1, MLE501.22, FSB | Lecturer: PhD. Truc Thi Kim, Nguyen</strong></div>
+                                <div style="font-size: 14px; margin-top: 6px;"><strong>by Nguyen Sy Hung, 2026</strong></div>
+                                <div style="color: var(--muted); font-size: 14px; margin-top: 6px;"><strong>Machine Learning 1, MLE501.22, FSB | Lecturer: PhD. Truc Thi Kim, Nguyen</strong></div>
                             </div>
                             <div class="hero-card-logo-column">
                                 <img class="hero-logo" src="{{ hero_logo_url }}" alt="Music Genre Prediction logo" />
@@ -1830,10 +1842,6 @@ def index():
                             <span class="badge" id="wsBadge">API Idle</span>
                             <span class="badge">Mode: <span id="modeLabel">---</span></span>
                             <span class="badge" id="statusBadge">Idle</span>
-                        </div>
-
-                        <div class="row" style="margin-top: 16px;">
-                            <audio id="player" controls></audio>
                         </div>
 
                         <div class="meter">
@@ -1865,7 +1873,11 @@ def index():
                         <div class="result-box">
                             <canvas id="trendCanvas" class="trend-canvas"></canvas>
                             <div class="trend-legend mono" id="trendLegend">Waiting for trend data...</div>
-                         </div>
+                        </div>
+
+                        <div class="row" style="margin-top: 16px;">
+                            <audio id="player" controls></audio>
+                        </div>
 
 
                         <div class="grid">
@@ -1975,6 +1987,7 @@ def index():
                                     let defaultFallingAssetSets = [];
                                     let activeFallingGenreKey = null;
                                     let fallingAssetRequestId = 0;
+                                    const fallingAssetPreloadCache = new Map();
 
                                     function parseTimestampMs(value) {
                                         if (value === null || value === undefined || value === '') return null;
@@ -2118,6 +2131,12 @@ def index():
                                         );
                                     }
 
+                                    function primeFallingAssetLibrary() {
+                                        Object.values(FALLING_ASSET_LIBRARY)
+                                            .flat()
+                                            .forEach(filename => preloadImage(`/demo-assets/${filename}`));
+                                    }
+
                                     function getFallingAssetFilenamesForGenre(genre) {
                                         const key = normalizeGenreKey(genre);
                                         return FALLING_ASSET_LIBRARY[key] || [];
@@ -2164,12 +2183,18 @@ def index():
                                     }
 
                                     function preloadImage(url) {
-                                        return new Promise(resolve => {
+                                        if (fallingAssetPreloadCache.has(url)) {
+                                            return fallingAssetPreloadCache.get(url);
+                                        }
+
+                                        const promise = new Promise(resolve => {
                                             const image = new Image();
                                             image.onload = () => resolve(true);
                                             image.onerror = () => resolve(false);
                                             image.src = url;
                                         });
+                                        fallingAssetPreloadCache.set(url, promise);
+                                        return promise;
                                     }
 
                                     async function updateFallingAssetsForGenre(genre) {
@@ -2323,7 +2348,7 @@ def index():
                                         const legendHtml = Array.from(seriesMap.entries())
                                             .map(([genre, series]) => `<span class="trend-chip"><span class="trend-chip-swatch" style="background:${series.color}"></span>${mapGenreLabel(genre)}</span>`)
                                             .join('');
-                                        trendLegend.innerHTML = `<span class="trend-chip">Genre Trend (180 Seconds):</span> ${legendHtml || 'Waiting for trend data...'}`;
+                                        trendLegend.innerHTML = legendHtml || 'Waiting for trend data...';
                                     }
 
                                     function updateInferenceUI(data) {
@@ -2353,10 +2378,10 @@ def index():
                                             const warmup = partial.is_warmup ? ' [warmup]' : '';
                                             const capturedTimeValue = partial.captured_time_ms || partial.timestamp || null;
                                             partialPredictionTimestampValue = capturedTimeValue;
+                                            updateFallingAssetsForGenre(partial.genre);
                                             if (partialPrediction) {
                                                 partialPrediction.innerHTML = `${formatDecoratedGenreLabelHtml(partial.genre)} (${(partial.confidence * 100).toFixed(1)}%)${warmup}`;
                                             }
-                                            updateFallingAssetsForGenre(partial.genre);
                                             if (partialTopK) {
                                                 partialTopK.textContent = formatTopK(partial.top_k);
                                             }
@@ -2606,6 +2631,7 @@ def index():
 
                                     // Initial state: not capturing; playback enabled.
                                     captureDefaultFallingAssetSets();
+                                    primeFallingAssetLibrary();
                                     restoreDefaultFallingAssets();
                                     setCapturingUI(false);
                                     applyPartialPredictionFade();
