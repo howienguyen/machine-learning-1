@@ -1981,7 +1981,7 @@ def index():
                                         'Bolero': ['bolero2.png', 'bolero3.png', 'bolero4.png'],
                                         'Speech': [],
                                     };
-                                    const trendPalette = ['#3574a1', '#F58F73', '#7eb37b', '#916240', '#795e8a', '#383573', '#852a3a', '#cf9717', '#ba2a1a', '#636363'];
+                                    const trendPalette = ['#3574a1', '#F58F73', '#7eb37b', '#916240', '#795e8a', '#413c9e', '#852a3a', '#cf9717', '#ba2a1a', '#636363'];
                                     let defaultFallingAssetSets = [];
                                     let activeFallingGenreKey = null;
                                     let fallingAssetRequestId = 0;
