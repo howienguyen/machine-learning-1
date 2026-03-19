@@ -1981,11 +1981,13 @@ def index():
                                         'Bolero': ['bolero2.png', 'bolero3.png', 'bolero4.png'],
                                         'Speech': [],
                                     };
-                                    const trendPalette = ['#3574a1', '#F58F73', '#7eb37b', '#916240', '#795e8a', '#5D84B6', '#852a3a', '#cf9717', '#ba2a1a', '#636363'];
+                                    const trendPalette = ['#3574a1', '#F58F73', '#7eb37b', '#916240', '#795e8a', '#383573', '#852a3a', '#cf9717', '#ba2a1a', '#636363'];
                                     let defaultFallingAssetSets = [];
                                     let activeFallingGenreKey = null;
                                     let fallingAssetRequestId = 0;
                                     const fallingAssetPreloadCache = new Map();
+                                    let previous_predicted_genre = null;
+                                    let latest_predicted_genre = null;
 
                                     function parseTimestampMs(value) {
                                         if (value === null || value === undefined || value === '') return null;
@@ -2170,10 +2172,10 @@ def index():
                                     }
 
                                     function restartFallingAnimations() {
-                                        document.querySelectorAll('.leaf-set div').forEach(div => {
-                                            div.style.animation = 'none';
-                                            void div.offsetHeight; // force reflow
-                                            div.style.animation = '';
+                                        document.querySelectorAll('.leaf-set').forEach(layer => {
+                                            Array.from(layer.children).forEach(div => {
+                                                layer.replaceChild(div.cloneNode(true), div);
+                                            });
                                         });
                                     }
 
@@ -2225,6 +2227,25 @@ def index():
                                             restoreDefaultFallingAssets();
                                             return;
                                         }
+                                    }
+
+                                    function syncPredictionGenreState(genre) {
+                                        latest_predicted_genre = normalizeGenreKey(genre) || null;
+                                        if (latest_predicted_genre === previous_predicted_genre) return;
+                                        previous_predicted_genre = latest_predicted_genre;
+
+                                        if (!latest_predicted_genre) {
+                                            restoreDefaultFallingAssets();
+                                            return;
+                                        }
+                                        const assetSets = buildFallingAssetSetsForGenre(latest_predicted_genre);
+                                        if (!assetSets) {
+                                            restoreDefaultFallingAssets();
+                                            return;
+                                        }
+                                        applyFallingAssetSets(assetSets);
+                                        restartFallingAnimations();
+                                        activeFallingGenreKey = latest_predicted_genre;
                                     }
 
                                     function renderGenreNotesMap(notesMap) {
@@ -2380,7 +2401,7 @@ def index():
                                             const warmup = partial.is_warmup ? ' [warmup]' : '';
                                             const capturedTimeValue = partial.captured_time_ms || partial.timestamp || null;
                                             partialPredictionTimestampValue = capturedTimeValue;
-                                            updateFallingAssetsForGenre(partial.genre);
+                                            syncPredictionGenreState(partial.genre);
                                             if (partialPrediction) {
                                                 partialPrediction.innerHTML = `${formatDecoratedGenreLabelHtml(partial.genre)} (${(partial.confidence * 100).toFixed(1)}%)${warmup}`;
                                             }
