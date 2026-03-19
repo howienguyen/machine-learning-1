@@ -1962,6 +1962,8 @@ def index():
                                     let partialPredictionTimestampValue = null;
                                     let partialPredictionFadeTimer = null;
                                     let partialPredictionAgeTimer = null;
+                                    const PARTIAL_PREDICTION_BLINK_OPACITY = 0.6;
+                                    const PARTIAL_PREDICTION_BLINK_PERIOD_MS = 130;
                                     const PARTIAL_PREDICTION_DIM_AFTER_8S_OPACITY = 0.80;
                                     const PARTIAL_PREDICTION_DIM_AFTER_15S_OPACITY = 0.85;
                                     const PARTIAL_PREDICTION_DIM_AFTER_45S_OPACITY = 0.40;
@@ -2052,6 +2054,11 @@ def index():
                                     function computePartialPredictionOpacity(nowMs) {
                                         if (!partialPredictionUpdatedAtMs) return 1;
                                         const ageMs = Math.max(0, nowMs - partialPredictionUpdatedAtMs);
+                                        if (ageMs <= 8 * 1000) {
+                                            return Math.floor(nowMs / PARTIAL_PREDICTION_BLINK_PERIOD_MS) % 2 === 0
+                                                ? 1
+                                                : PARTIAL_PREDICTION_BLINK_OPACITY;
+                                        }
                                         if (ageMs > 60 * 1000) return PARTIAL_PREDICTION_DIM_AFTER_60S_OPACITY;
                                         if (ageMs > 45 * 1000) return PARTIAL_PREDICTION_DIM_AFTER_45S_OPACITY;
                                         if (ageMs > 15 * 1000) return PARTIAL_PREDICTION_DIM_AFTER_15S_OPACITY;
