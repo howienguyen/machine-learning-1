@@ -107,7 +107,7 @@ INFERENCE_MODE = "single_crop"
 # Server-side partial-result cadence once a full latest-window snapshot is available.
 EMIT_INTERVAL_SEC = 1
 # Client-side cadence for sending the latest MIN_INFERENCE_SECONDS snapshot to the service.
-SEND_INTERVAL_SEC = 5
+SEND_INTERVAL_SEC = 8
 # REST connect timeout for service probes and inference requests.
 REST_CONNECT_TIMEOUT_SEC = 15.0
 
@@ -2051,7 +2051,7 @@ def index():
                                         partialPredictionAgeTimer = setInterval(updatePartialPredictionAgeLabel, 1000);
                                     }
 
-                                    function computePartialPredictionOpacity(nowMs) {
+                                    function computePartialPredictionLineOpacity(nowMs) {
                                         if (!partialPredictionUpdatedAtMs) return 1;
                                         const ageMs = Math.max(0, nowMs - partialPredictionUpdatedAtMs);
                                         if (ageMs <= 8 * 1000) {
@@ -2059,6 +2059,12 @@ def index():
                                                 ? 1
                                                 : PARTIAL_PREDICTION_BLINK_OPACITY;
                                         }
+                                        return 1;
+                                    }
+
+                                    function computePartialPredictionBodyOpacity(nowMs) {
+                                        if (!partialPredictionUpdatedAtMs) return 1;
+                                        const ageMs = Math.max(0, nowMs - partialPredictionUpdatedAtMs);
                                         if (ageMs > 60 * 1000) return PARTIAL_PREDICTION_DIM_AFTER_60S_OPACITY;
                                         if (ageMs > 45 * 1000) return PARTIAL_PREDICTION_DIM_AFTER_45S_OPACITY;
                                         if (ageMs > 15 * 1000) return PARTIAL_PREDICTION_DIM_AFTER_15S_OPACITY;
@@ -2067,9 +2073,14 @@ def index():
                                     }
 
                                     function applyPartialPredictionFade() {
-                                        if (!partialPrediction) return;
-                                        const opacity = computePartialPredictionOpacity(Date.now());
-                                        partialPrediction.style.opacity = opacity.toFixed(3);
+                                        if (partialPrediction) {
+                                            const lineOpacity = computePartialPredictionLineOpacity(Date.now());
+                                            partialPrediction.style.opacity = lineOpacity.toFixed(3);
+                                        }
+                                        if (partialPredictionBody) {
+                                            const bodyOpacity = computePartialPredictionBodyOpacity(Date.now());
+                                            partialPredictionBody.style.opacity = bodyOpacity.toFixed(3);
+                                        }
                                     }
 
                                     function ensurePartialPredictionFadeTimer() {
@@ -2080,6 +2091,12 @@ def index():
                                     function formatTopK(items) {
                                         if (!items || !items.length) return '---';
                                         return items.map(item => `${mapGenreLabel(item.genre)} (${(item.probability * 100).toFixed(1)}%)`).join(' | ');
+                                    }
+
+                                    function formatSecondaryTopK(items) {
+                                        if (!items || items.length < 2) return '---';
+                                        const secondItem = items[1];
+                                        return `${mapGenreLabel(secondItem.genre)} (${(secondItem.probability * 100).toFixed(1)}%)`;
                                     }
 
                                     function mapGenreLabel(genre) {
@@ -2413,7 +2430,7 @@ def index():
                                                 partialPrediction.innerHTML = `${formatDecoratedGenreLabelHtml(partial.genre)} (${(partial.confidence * 100).toFixed(1)}%)${warmup}`;
                                             }
                                             if (partialTopK) {
-                                                partialTopK.textContent = formatTopK(partial.top_k);
+                                                partialTopK.textContent = formatSecondaryTopK(partial.top_k);
                                             }
                                             if (partialTimestamp) {
                                                 partialTimestamp.textContent = `Captured time: ${formatLocalTimestamp(capturedTimeValue, true)}`;
