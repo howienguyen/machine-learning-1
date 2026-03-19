@@ -1964,9 +1964,9 @@ def index():
                                     let partialPredictionAgeTimer = null;
                                     const PARTIAL_PREDICTION_BLINK_OPACITY = 0.6;
                                     const PARTIAL_PREDICTION_BLINK_PERIOD_MS = 130;
-                                    const PARTIAL_PREDICTION_DIM_AFTER_8S_OPACITY = 0.80;
-                                    const PARTIAL_PREDICTION_DIM_AFTER_15S_OPACITY = 0.85;
-                                    const PARTIAL_PREDICTION_DIM_AFTER_45S_OPACITY = 0.40;
+                                    const PARTIAL_PREDICTION_DIM_AFTER_8S_OPACITY = 0.70;
+                                    const PARTIAL_PREDICTION_DIM_AFTER_15S_OPACITY = 0.50;
+                                    const PARTIAL_PREDICTION_DIM_AFTER_45S_OPACITY = 0.30;
                                     const PARTIAL_PREDICTION_DIM_AFTER_60S_OPACITY = 0.20;
                                     const DEFAULT_LEAF_SELECTOR = '.leaf-set img';
                                     const FALLING_ASSET_LAYER_COUNT = 3;
@@ -2511,6 +2511,9 @@ def index():
                                             meterMode = 'idle';
                                             levelBar.style.transition = 'width 30ms linear';
                                             resetMeter();
+                                            latest_predicted_genre = null;
+                                            previous_predicted_genre = null;
+                                            restoreDefaultFallingAssets();
                                             stopLevelPolling();
                                             startInferencePolling();
                                         }
