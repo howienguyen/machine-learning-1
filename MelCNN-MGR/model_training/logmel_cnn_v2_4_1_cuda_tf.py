@@ -280,7 +280,7 @@ ENABLE_TRAIN_EVAL_METRICS = False   # extra full clean-train evaluation each epo
 DATASET_PARALLELISM_MODE = "fixed"  # safe default; set to "autotune" only for experiments, as it may be unstable on some TF/CUDA runs
 DATASET_FIXED_NUM_PARALLEL_CALLS = 6
 DATASET_FIXED_NUM_PARALLEL_READS = 6
-DATASET_PREFETCH_MODE = "autotune"  # "fixed" uses DATASET_FIXED_PREFETCH_BUFFER_SIZE; "autotune" uses tf.data.AUTOTUNE
+DATASET_PREFETCH_MODE = "fixed"  # safe default; set to "autotune" only for experiments when memory headroom is acceptable
 DATASET_FIXED_PREFETCH_BUFFER_SIZE = 3
 DATASET_AUTOTUNE_RAM_BUDGET_BYTES = 2 * 1024 * 1024 * 1024 * 1.5  # default 2 * 1.5 GiB tf.data autotune budget; set to None to use TensorFlow's default budget
 
@@ -925,7 +925,7 @@ def make_dataset(
     sample_count = len(index_df)
     ds = _build_record_dataset_from_shards(shard_df, shuffle_files=shuffle)
 
-    if DATASET_AUTOTUNE_ENABLED or DATASET_PREFETCH_AUTOTUNE_ENABLED or DATASET_AUTOTUNE_RAM_BUDGET_BYTES is not None:
+    if DATASET_AUTOTUNE_ENABLED or DATASET_PREFETCH_AUTOTUNE_ENABLED:
         options = tf.data.Options()
         options.autotune.enabled = True
         if DATASET_AUTOTUNE_RAM_BUDGET_BYTES is not None:
@@ -1499,9 +1499,18 @@ class _GapAwareEarlyStopping(tf.keras.callbacks.Callback):
 
 
 class _EpochMetricsSummary(tf.keras.callbacks.Callback):
-    def __init__(self, max_epochs: int):
+    def __init__(self, max_epochs: int, standard_early_stopping_cb: tf.keras.callbacks.EarlyStopping | None = None):
         super().__init__()
         self.max_epochs = max_epochs
+        self.standard_early_stopping_cb = standard_early_stopping_cb
+
+    @staticmethod
+    def _fmt_metric(value: float | None) -> str:
+        return "n/a" if value is None else f"{float(value):.4f}"
+
+    @staticmethod
+    def _yes_no(value: bool) -> str:
+        return "yes" if value else "no"
 
     def on_epoch_end(self, epoch, logs=None):
         logs = logs or {}
@@ -1512,18 +1521,40 @@ class _EpochMetricsSummary(tf.keras.callbacks.Callback):
         train_macro_f1 = logs.get("train_eval_macro_f1")
         val_macro_f1 = logs.get("val_macro_f1")
 
-        acc_gap = None if train_acc is None or val_acc is None else float(train_acc) - float(val_acc)
-        f1_gap = None if train_macro_f1 is None or val_macro_f1 is None else float(train_macro_f1) - float(val_macro_f1)
+        early_stopping_cb = self.standard_early_stopping_cb
+        early_stop_monitor = "val_macro_f1"
+        early_stop_best = None
+        early_stop_current = None
+        early_stop_patience = STANDARD_EARLY_STOP_PATIENCE
+        early_stop_bad_epochs = 0
+        early_stop_active = False
+        early_stop_improvement = False
+        early_stop_condition_met = False
 
-        def _fmt(value: float | None) -> str:
-            return "n/a" if value is None else f"{float(value):.4f}"
+        if early_stopping_cb is not None:
+            early_stop_monitor = str(early_stopping_cb.monitor)
+            early_stop_current = logs.get(early_stop_monitor)
+            early_stop_patience = int(early_stopping_cb.patience)
+            early_stop_bad_epochs = int(getattr(early_stopping_cb, "wait", 0))
+            early_stop_active = early_stop_current is not None and epoch >= int(early_stopping_cb.start_from_epoch)
+            early_stop_improvement = bool(early_stop_active and getattr(early_stopping_cb, "best_epoch", None) == epoch)
+            early_stop_condition_met = bool(getattr(early_stopping_cb, "stopped_epoch", 0) == epoch)
+
+            best_value = getattr(early_stopping_cb, "best", None)
+            if best_value is not None and np.isfinite(best_value):
+                early_stop_best = float(best_value)
 
         print(
             "\n"
-            f"  [EpochSummary] {epoch + 1:03d}/{self.max_epochs:03d} "
-            f"train_loss={_fmt(train_loss)} val_loss={_fmt(val_loss)} "
-            f"train_acc={_fmt(train_acc)} val_acc={_fmt(val_acc)} acc_gap={_fmt(acc_gap)} "
-            f"train_macro_f1={_fmt(train_macro_f1)} val_macro_f1={_fmt(val_macro_f1)} f1_gap={_fmt(f1_gap)}"
+            f"[EpochSummary] {epoch + 1}/{self.max_epochs} "
+            f"train_loss={self._fmt_metric(train_loss)} val_loss={self._fmt_metric(val_loss)} "
+            f"train_acc={self._fmt_metric(train_acc)} val_acc={self._fmt_metric(val_acc)} "
+            f"train_macro_f1={self._fmt_metric(train_macro_f1)} val_macro_f1={self._fmt_metric(val_macro_f1)} "
+            f"| EarlyStop active={self._yes_no(early_stop_active)} monitor={early_stop_monitor} "
+            f"best={self._fmt_metric(early_stop_best)} current={self._fmt_metric(early_stop_current)} "
+            f"improvement={self._yes_no(early_stop_improvement)} "
+            f"bad_epochs={early_stop_bad_epochs}/{early_stop_patience} "
+            f"condition_met={self._yes_no(early_stop_condition_met)}"
         )
 
 
@@ -1556,7 +1587,6 @@ lr_logger = _LRLogger()
 epoch_timer = _EpochTimer()
 val_macro_f1_cb = _ValMacroF1(val_ds=val_ds)
 train_eval_metrics_cb = _TrainEvalMetrics(train_eval_ds=train_eval_ds) if ENABLE_TRAIN_EVAL_METRICS else None
-epoch_metrics_summary_cb = _EpochMetricsSummary(max_epochs=EPOCHS)
 
 
 def _train_eval_accuracy_history() -> list[float]:
@@ -1569,6 +1599,7 @@ def _train_eval_f1_history() -> list[float]:
 
 def make_training_callbacks(enable_checkpointing: bool, enable_early_stopping: bool):
     stage_callbacks = [val_macro_f1_cb]
+    standard_early_stopping_cb = None
     if train_eval_metrics_cb is not None:
         stage_callbacks.append(train_eval_metrics_cb)
     if enable_early_stopping and train_eval_metrics_cb is not None:
@@ -1584,7 +1615,6 @@ def make_training_callbacks(enable_checkpointing: bool, enable_early_stopping: b
                 verbose=1,
             )
         )
-    stage_callbacks.append(epoch_metrics_summary_cb)
     if enable_checkpointing:
         stage_callbacks.append(
             tf.keras.callbacks.ModelCheckpoint(
@@ -1597,8 +1627,7 @@ def make_training_callbacks(enable_checkpointing: bool, enable_early_stopping: b
             )
         )
     if enable_early_stopping:
-        stage_callbacks.append(
-            tf.keras.callbacks.EarlyStopping(
+        standard_early_stopping_cb = tf.keras.callbacks.EarlyStopping(
                 monitor="val_macro_f1",
                 mode="max",
                 patience=STANDARD_EARLY_STOP_PATIENCE,
@@ -1607,7 +1636,13 @@ def make_training_callbacks(enable_checkpointing: bool, enable_early_stopping: b
                 restore_best_weights=STANDARD_EARLY_STOP_RESTORE_BEST_WEIGHTS,
                 verbose=1,
             )
+        stage_callbacks.append(standard_early_stopping_cb)
+    stage_callbacks.append(
+        _EpochMetricsSummary(
+            max_epochs=EPOCHS,
+            standard_early_stopping_cb=standard_early_stopping_cb,
         )
+    )
     stage_callbacks.extend([lr_logger, epoch_timer])
     return stage_callbacks
 

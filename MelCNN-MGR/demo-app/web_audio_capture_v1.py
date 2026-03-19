@@ -44,6 +44,7 @@ import math
 import random
 import sys
 import logging
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
@@ -125,7 +126,7 @@ MAX_TREND_HISTORY_POINTS = 512
 DEMO_APP_IMAGES_DIR = (WORKSPACE_ROOT / "MelCNN-MGR" / "demo-app" / "images").resolve()
 CAPTURED_AUDIO_DIR = (WORKSPACE_ROOT / "MelCNN-MGR" / "data" / "tmp_demo_app").resolve()
 MAX_SAVED_CAPTURED_CLIPS = 10
-SAVE_LATEST_CAPTURED_CLIPS = True
+SAVE_LATEST_CAPTURED_CLIPS = False
 
 app = Flask(__name__)
 
@@ -215,8 +216,8 @@ def _pcm_payload_to_wav_bytes(pcm_bytes: bytes, sample_rate: int, channels: int)
     return create_wav_header(sample_rate, channels, len(pcm_bytes)) + pcm_bytes
 
 
-def _utc_timestamp() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+def _local_timestamp() -> str:
+    return datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _sanitize_filename_component(value: str) -> str:
@@ -430,7 +431,7 @@ class _InferenceState:
             self.genre_result_notes[genre] = notes
         notes.append(
             {
-                'timestamp': _utc_timestamp(),
+                'timestamp': _local_timestamp(),
                 'event': payload.get('event'),
                 'genre': genre,
                 'confidence': payload.get('confidence'),
@@ -449,7 +450,7 @@ class _InferenceState:
         ts_epoch = float(time.time())
         self.prediction_trend_history.append(
             {
-                'timestamp': payload.get('timestamp') or _utc_timestamp(),
+                'timestamp': payload.get('timestamp') or _local_timestamp(),
                 'ts_epoch': ts_epoch,
                 'event': payload.get('event'),
                 'genre': payload.get('genre'),
@@ -537,7 +538,7 @@ class _InferenceState:
             if event == 'partial_result':
                 if not payload.get('timestamp'):
                     payload = dict(payload)
-                    payload['timestamp'] = _utc_timestamp()
+                    payload['timestamp'] = _local_timestamp()
                 self.last_partial = payload
                 self._record_prediction_note_locked(payload)
                 self._record_prediction_trend_locked(payload)
@@ -545,7 +546,7 @@ class _InferenceState:
             elif event == 'final_result':
                 if not payload.get('timestamp'):
                     payload = dict(payload)
-                    payload['timestamp'] = _utc_timestamp()
+                    payload['timestamp'] = _local_timestamp()
                 self.last_final = payload
                 self.streaming = False
                 self._record_prediction_note_locked(payload)
@@ -1424,7 +1425,7 @@ def index():
                     .card {
                         position: relative;
                         overflow: hidden;
-                        background: linear-gradient(180deg, rgba(40, 44, 51, 0.96), rgba(40, 42, 46, 0.97));
+                        background: linear-gradient(180deg, rgba(40, 44, 51, 0.77), rgba(40, 42, 46, 0.78));
                         border: 1px solid var(--border);
                         border-radius: 9px;
                         padding: 20px 18px;
@@ -1438,7 +1439,7 @@ def index():
                         background: linear-gradient(rgba(24, 27, 31, 0.88), rgba(24, 27, 31, 0.88)),
                                     url("{{ hero_bg_url }}") no-repeat center center / cover;
                         filter: blur(10px);
-                        opacity: 0.5;
+                        opacity: 0.4;
                         transform: scale(1.06);
                         transform-origin: center center;
                         pointer-events: none;
@@ -1465,13 +1466,13 @@ def index():
                     .hero-card {
                         position: relative;
                         overflow: hidden;
-                        background: linear-gradient(135deg, rgba(93, 132, 182, 0.18), rgba(245, 143, 115, 0.12) 42%, rgba(143, 216, 139, 0.10));
+                        background: linear-gradient(135deg, rgba(93, 132, 182, 0.14), rgba(245, 143, 115, 0.096) 42%, rgba(143, 216, 139, 0.08));
                     }
 
                     .hero-card::before {
                         background: linear-gradient(rgba(24, 27, 31, 0.82), rgba(24, 27, 31, 0.82)),
                                     url("{{ hero_bg_url }}") no-repeat center center / cover;
-                        opacity: 0.42;
+                        opacity: 0.34;
                     }
 
                     .hero-card > .hero-card-overlay {
@@ -1653,6 +1654,13 @@ def index():
                         font-weight: 600;
                     }
 
+                    .label-inline-meta {
+                        margin-left: 6px;
+                        color: var(--muted);
+                        font-size: 16px;
+                        font-weight: 500;
+                    }
+
                     .result-box {
                         margin-top: 16px;
                         padding: 14px;
@@ -1788,7 +1796,7 @@ def index():
                         </div>
 
                         <div class="result-box">
-                            <div class="label"><strong>Latest Partial Prediction</strong></div>
+                            <div class="label"><strong>Latest 15-Second Audio Prediction</strong><span class="label-inline-meta" id="partialPredictionAge"></span></div>
                             <div class="prediction-fade-body" id="partialPredictionBody">
                                 <div class="value" id="partialPrediction">Waiting for inference...</div>
                                 <div class="mono" id="partialTopK"></div>
@@ -1844,7 +1852,7 @@ def index():
 
 
                         <div class="result-box">
-                            <div class="label">Service / Error Status</div>
+                            <div class="label">Service Status</div>
                             <div class="mono" id="serviceStatus">No messages yet.</div>
                         </div>
 
@@ -1873,6 +1881,7 @@ def index():
                                     const sentPayloads = document.getElementById('sentPayloads');
                                     const partialPrediction = document.getElementById('partialPrediction');
                                     const partialPredictionBody = document.getElementById('partialPredictionBody');
+                                    const partialPredictionAge = document.getElementById('partialPredictionAge');
                                     const partialTopK = document.getElementById('partialTopK');
                                     const partialTimestamp = document.getElementById('partialTimestamp');
                                     const finalPrediction = document.getElementById('finalPrediction');
@@ -1889,10 +1898,13 @@ def index():
                                     let levelSmoothed = 0;
                                     let meterMode = 'idle'; // 'capture' | 'playback' | 'idle'
                                     let partialPredictionUpdatedAtMs = null;
+                                    let partialPredictionTimestampValue = null;
                                     let partialPredictionFadeTimer = null;
-                                    const PARTIAL_PREDICTION_FULL_BRIGHTNESS_MS = 30 * 1000;
-                                    const PARTIAL_PREDICTION_FADE_SPAN_MS = 30 * 1000;
-                                    const PARTIAL_PREDICTION_MIN_OPACITY = 0.8;
+                                    let partialPredictionAgeTimer = null;
+                                    const PARTIAL_PREDICTION_DIM_AFTER_15S_OPACITY = 0.85;
+                                    const PARTIAL_PREDICTION_DIM_AFTER_30S_OPACITY = 0.70;
+                                    const PARTIAL_PREDICTION_DIM_AFTER_45S_OPACITY = 0.40;
+                                    const PARTIAL_PREDICTION_DIM_AFTER_60S_OPACITY = 0.20;
                                     const trendPalette = ['#82D7DD', '#F58F73', '#8FD88B', '#EEA0B8', '#DDB85B', '#5D84B6', '#E8D6C8', '#4FA7A2', '#F4F0F2', '#C6E48B'];
 
                                     function parseTimestampMs(value) {
@@ -1901,13 +1913,50 @@ def index():
                                         return Number.isFinite(parsed) ? parsed : null;
                                     }
 
+                                    function formatLocalTimestamp(value) {
+                                        if (!value) return '---';
+                                        const raw = String(value);
+                                        if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(raw)) {
+                                            return raw;
+                                        }
+
+                                        const parsed = new Date(raw);
+                                        if (Number.isNaN(parsed.getTime())) return raw;
+
+                                        const pad2 = number => String(number).padStart(2, '0');
+                                        return `${parsed.getFullYear()}-${pad2(parsed.getMonth() + 1)}-${pad2(parsed.getDate())} ${pad2(parsed.getHours())}:${pad2(parsed.getMinutes())}:${pad2(parsed.getSeconds())}`;
+                                    }
+
+                                    function formatPredictionAgeLabel(timestampValue, nowMs = Date.now()) {
+                                        const timestampMs = parseTimestampMs(timestampValue);
+                                        if (timestampMs === null) return '';
+                                        const ageSeconds = Math.max(0, Math.floor((nowMs - timestampMs) / 1000));
+                                        if (ageSeconds < 60) {
+                                            return `(${ageSeconds} second${ageSeconds === 1 ? '' : 's'} ago)`;
+                                        }
+                                        const ageMinutes = Math.floor(ageSeconds / 60);
+                                        const remainingSeconds = ageSeconds % 60;
+                                        return `(${ageMinutes}m ${remainingSeconds}s ago)`;
+                                    }
+
+                                    function updatePartialPredictionAgeLabel() {
+                                        if (!partialPredictionAge) return;
+                                        partialPredictionAge.textContent = formatPredictionAgeLabel(partialPredictionTimestampValue);
+                                    }
+
+                                    function ensurePartialPredictionAgeTimer() {
+                                        if (partialPredictionAgeTimer) return;
+                                        partialPredictionAgeTimer = setInterval(updatePartialPredictionAgeLabel, 1000);
+                                    }
+
                                     function computePartialPredictionOpacity(nowMs) {
                                         if (!partialPredictionUpdatedAtMs) return 1;
                                         const ageMs = Math.max(0, nowMs - partialPredictionUpdatedAtMs);
-                                        if (ageMs <= PARTIAL_PREDICTION_FULL_BRIGHTNESS_MS) return 1;
-                                        const fadeAgeMs = ageMs - PARTIAL_PREDICTION_FULL_BRIGHTNESS_MS;
-                                        const fadeRatio = Math.min(1, fadeAgeMs / PARTIAL_PREDICTION_FADE_SPAN_MS);
-                                        return 1 - (1 - PARTIAL_PREDICTION_MIN_OPACITY) * fadeRatio;
+                                        if (ageMs > 60 * 1000) return PARTIAL_PREDICTION_DIM_AFTER_60S_OPACITY;
+                                        if (ageMs > 45 * 1000) return PARTIAL_PREDICTION_DIM_AFTER_45S_OPACITY;
+                                        if (ageMs > 30 * 1000) return PARTIAL_PREDICTION_DIM_AFTER_30S_OPACITY;
+                                        if (ageMs > 15 * 1000) return PARTIAL_PREDICTION_DIM_AFTER_15S_OPACITY;
+                                        return 1;
                                     }
 
                                     function applyPartialPredictionFade() {
@@ -1923,7 +1972,16 @@ def index():
 
                                     function formatTopK(items) {
                                         if (!items || !items.length) return '---';
-                                        return items.map(item => `${item.genre} (${(item.probability * 100).toFixed(1)}%)`).join(' | ');
+                                        return items.map(item => `${mapGenreLabel(item.genre)} (${(item.probability * 100).toFixed(1)}%)`).join(' | ');
+                                    }
+
+                                    function mapGenreLabel(genre) {
+                                        if (!genre && genre !== 0) return genre;
+                                        const g = String(genre);
+                                        // Render a friendly label for Borelo/Bolero while keeping
+                                        // the original genre value in the underlying data.
+                                        if (g === 'Borelo' || g === 'Bolero') return 'Borelo Việt Nam';
+                                        return g;
                                     }
 
                                     function renderGenreNotesMap(notesMap) {
@@ -1937,7 +1995,11 @@ def index():
                                                 if (!Array.isArray(notes)) return [];
                                                 return notes.map(note => ({ ...note, genre: note.genre || genre }));
                                             })
-                                            .sort((a, b) => String(b.timestamp || '').localeCompare(String(a.timestamp || '')))
+                                            .sort((a, b) => {
+                                                const left = parseTimestampMs(a.timestamp) ?? 0;
+                                                const right = parseTimestampMs(b.timestamp) ?? 0;
+                                                return right - left;
+                                            })
                                             .slice(0, 10)
                                             .map(note => {
                                                 const confidence = Number(note.confidence || 0);
@@ -1945,9 +2007,9 @@ def index():
                                                 const bufferSeconds = Number(note.buffer_seconds || 0).toFixed(2);
                                                 return `
                                                     <li class="notes-item">
-                                                        <strong>${note.genre || '---'}</strong>
+                                                        <strong>${mapGenreLabel(note.genre) || '---'}</strong>
                                                         <span>${note.event || 'result'} • ${(confidence * 100).toFixed(1)}%</span>
-                                                        <div class="notes-meta">${note.timestamp || '---'} | requests ${chunks} | buffer ${bufferSeconds}s</div>
+                                                        <div class="notes-meta">${formatLocalTimestamp(note.timestamp)} | requests ${chunks} | buffer ${bufferSeconds}s</div>
                                                     </li>
                                                 `;
                                             })
@@ -2043,7 +2105,7 @@ def index():
                                         }
 
                                         const legendHtml = Array.from(seriesMap.entries())
-                                            .map(([genre, series]) => `<span class="trend-chip"><span class="trend-chip-swatch" style="background:${series.color}"></span>${genre}</span>`)
+                                            .map(([genre, series]) => `<span class="trend-chip"><span class="trend-chip-swatch" style="background:${series.color}"></span>${mapGenreLabel(genre)}</span>`)
                                             .join('');
                                         trendLegend.innerHTML = legendHtml || 'Waiting for trend data...';
                                     }
@@ -2073,30 +2135,33 @@ def index():
                                         const partial = data.last_partial;
                                         if (partial) {
                                             const warmup = partial.is_warmup ? ' [warmup]' : '';
+                                            partialPredictionTimestampValue = partial.timestamp || null;
                                             if (partialPrediction) {
-                                                partialPrediction.textContent = `${partial.genre} (${(partial.confidence * 100).toFixed(1)}%)${warmup}`;
+                                                partialPrediction.textContent = `${mapGenreLabel(partial.genre)} (${(partial.confidence * 100).toFixed(1)}%)${warmup}`;
                                             }
                                             if (partialTopK) {
                                                 partialTopK.textContent = formatTopK(partial.top_k);
                                             }
                                             if (partialTimestamp) {
-                                                partialTimestamp.textContent = `Timestamp: ${partial.timestamp || '---'}`;
+                                                partialTimestamp.textContent = `Timestamp: ${formatLocalTimestamp(partial.timestamp)}`;
                                             }
                                             partialPredictionUpdatedAtMs = parseTimestampMs(partial.timestamp) || Date.now();
                                             applyPartialPredictionFade();
                                             ensurePartialPredictionFadeTimer();
+                                            updatePartialPredictionAgeLabel();
+                                            ensurePartialPredictionAgeTimer();
                                         }
 
                                         const final = data.last_final;
                                         if (final) {
                                             if (finalPrediction) {
-                                                finalPrediction.textContent = `${final.genre} (${(final.confidence * 100).toFixed(1)}%)`;
+                                                finalPrediction.textContent = `${mapGenreLabel(final.genre)} (${(final.confidence * 100).toFixed(1)}%)`;
                                             }
                                             if (finalTopK) {
                                                 finalTopK.textContent = formatTopK(final.top_k);
                                             }
                                             if (finalTimestamp) {
-                                                finalTimestamp.textContent = `Timestamp: ${final.timestamp || '---'}`;
+                                                finalTimestamp.textContent = `Timestamp: ${formatLocalTimestamp(final.timestamp)}`;
                                             }
                                         }
 

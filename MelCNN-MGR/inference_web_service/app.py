@@ -61,7 +61,17 @@ from model_inference.inference_logmel_cnn_v2_x import (
 
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8000
-MODEL_NAME = "logmel-cnn-v2_4-cuda-tf-20260317-151350"
+MODEL_NAME = None
+SETTINGS_PATH = MELCNN_DIR / "settings.json"
+try:
+    if SETTINGS_PATH.exists():
+        with open(SETTINGS_PATH, "r") as fh:
+            _settings = json.load(fh)
+        MODEL_NAME = _settings.get("model_inference_settings", {}).get("model_name")
+except Exception:
+    MODEL_NAME = None
+
+MODEL_NAME = MODEL_NAME or "logmel-cnn-v2_4-cuda-tf-20260318-104959"
 DEFAULT_MODEL_DIR = (MELCNN_DIR / "demo-models" / MODEL_NAME).resolve()
 STREAM_PATH = "/ws/stream"
 LOGGER = logging.getLogger("melcnn.inference_web_service")
@@ -69,7 +79,7 @@ DEFAULT_WS_PING_INTERVAL = 20.0
 DEFAULT_WS_PING_TIMEOUT = 20.0
 TMP_AUDIO_DIR = (MELCNN_DIR / "data" / "tmp_inference").resolve()
 MAX_SAVED_AUDIO_CLIPS = 10
-SAVE_LATEST_AUDIO_CLIPS = True
+SAVE_LATEST_AUDIO_CLIPS = False
 
 
 def _ws_payload_summary(payload: dict[str, Any]) -> str:
