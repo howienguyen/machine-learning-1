@@ -1856,7 +1856,7 @@ def index():
                         <div class="result-box">
                             <div class="label prediction-header"><strong>Latest 15-Second Audio Prediction</strong><span class="label-inline-meta" id="partialPredictionAge"></span></div>
                             <div class="prediction-fade-body" id="partialPredictionBody">
-                                <div class="value prediction-line" id="partialPrediction">Waiting for inference...</div>
+                                <div style="margin-bottom: 6px;" class="value prediction-line" id="partialPrediction">Waiting for inference...</div>
                                 <div class="mono" id="partialTopK"></div>
                                 <div class="mono" id="partialTimestamp">---</div>
                             </div>
@@ -1962,10 +1962,8 @@ def index():
                                     let partialPredictionTimestampValue = null;
                                     let partialPredictionFadeTimer = null;
                                     let partialPredictionAgeTimer = null;
-                                    const PARTIAL_PREDICTION_BLINK_OPACITY = 0.6;
-                                    const PARTIAL_PREDICTION_BLINK_PERIOD_MS = 160;
+                                    const PARTIAL_PREDICTION_DIM_AFTER_8S_OPACITY = 0.80;
                                     const PARTIAL_PREDICTION_DIM_AFTER_15S_OPACITY = 0.85;
-                                    const PARTIAL_PREDICTION_DIM_AFTER_30S_OPACITY = 0.70;
                                     const PARTIAL_PREDICTION_DIM_AFTER_45S_OPACITY = 0.40;
                                     const PARTIAL_PREDICTION_DIM_AFTER_60S_OPACITY = 0.20;
                                     const DEFAULT_LEAF_SELECTOR = '.leaf-set img';
@@ -2052,15 +2050,10 @@ def index():
                                     function computePartialPredictionOpacity(nowMs) {
                                         if (!partialPredictionUpdatedAtMs) return 1;
                                         const ageMs = Math.max(0, nowMs - partialPredictionUpdatedAtMs);
-                                        if (ageMs < 15 * 1000) {
-                                            return Math.floor(nowMs / PARTIAL_PREDICTION_BLINK_PERIOD_MS) % 2 === 0
-                                                ? 1
-                                                : PARTIAL_PREDICTION_BLINK_OPACITY;
-                                        }
                                         if (ageMs > 60 * 1000) return PARTIAL_PREDICTION_DIM_AFTER_60S_OPACITY;
                                         if (ageMs > 45 * 1000) return PARTIAL_PREDICTION_DIM_AFTER_45S_OPACITY;
-                                        if (ageMs > 30 * 1000) return PARTIAL_PREDICTION_DIM_AFTER_30S_OPACITY;
                                         if (ageMs > 15 * 1000) return PARTIAL_PREDICTION_DIM_AFTER_15S_OPACITY;
+                                        if (ageMs > 8 * 1000) return PARTIAL_PREDICTION_DIM_AFTER_8S_OPACITY;
                                         return 1;
                                     }
 
@@ -2176,6 +2169,14 @@ def index():
                                         });
                                     }
 
+                                    function restartFallingAnimations() {
+                                        document.querySelectorAll('.leaf-set div').forEach(div => {
+                                            div.style.animation = 'none';
+                                            void div.offsetHeight; // force reflow
+                                            div.style.animation = '';
+                                        });
+                                    }
+
                                     function restoreDefaultFallingAssets() {
                                         if (!defaultFallingAssetSets.length) return;
                                         applyFallingAssetSets(defaultFallingAssetSets);
@@ -2214,6 +2215,7 @@ def index():
                                         const requestId = ++fallingAssetRequestId;
 
                                         applyFallingAssetSets(assetSets);
+                                        restartFallingAnimations();
                                         activeFallingGenreKey = normalizedGenre;
 
                                         const loaded = await Promise.all(assetSets.flat().map(preloadImage));
