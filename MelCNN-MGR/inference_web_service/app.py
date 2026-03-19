@@ -348,6 +348,12 @@ def _prediction_to_dict(result: PredictionResult) -> dict[str, Any]:
     }
 
 
+def _attach_request_metadata(payload: dict[str, Any], captured_time_ms: str | None = None) -> dict[str, Any]:
+    if captured_time_ms is not None and str(captured_time_ms).strip():
+        payload["captured_time_ms"] = str(captured_time_ms)
+    return payload
+
+
 def _resolve_mode(raw_mode: str | None) -> str:
     mode = (raw_mode or "three_crop").strip()
     if mode not in {"single_crop", "three_crop"}:
@@ -424,6 +430,7 @@ def create_app(
     async def predict(
         audio_path: str | None = Form(default=None),
         mode_form: str | None = Form(default=None),
+        captured_time_ms: str | None = Form(default=None),
         file: UploadFile | None = File(default=None),
     ) -> Any:
         mode = mode_form
@@ -456,6 +463,7 @@ def create_app(
                 result.confidence,
             )
             payload = _prediction_to_dict(result)
+            _attach_request_metadata(payload, captured_time_ms=captured_time_ms)
             payload["request_source"] = "upload"
             payload["original_filename"] = file.filename
             return payload
@@ -496,6 +504,7 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         payload = _prediction_to_dict(result)
+        _attach_request_metadata(payload, captured_time_ms=body.get("captured_time_ms"))
         payload["request_source"] = "audio_path"
         return payload
 

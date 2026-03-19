@@ -278,6 +278,7 @@ class _RollingAudioBuffer:
     def __init__(self):
         self._lock = threading.Lock()
         self._chunks = deque()
+        self._chunk_end_time_ms = deque()
         self._max_chunks = 1
         self.sample_rate = None
         self.channels = None
@@ -290,14 +291,19 @@ class _RollingAudioBuffer:
             chunks_per_second = self.sample_rate / FRAMES_PER_BUFFER
             self._max_chunks = max(1, int(CLIP_SECONDS * chunks_per_second) + 1)
             self._chunks = deque(maxlen=self._max_chunks)
+            self._chunk_end_time_ms = deque(maxlen=self._max_chunks)
 
     def clear(self):
         with self._lock:
             self._chunks.clear()
+            self._chunk_end_time_ms.clear()
 
-    def push(self, pcm_bytes):
+    def push(self, pcm_bytes, chunk_end_time_ms=None):
         with self._lock:
             self._chunks.append(pcm_bytes)
+            if chunk_end_time_ms is None:
+                chunk_end_time_ms = int(time.time() * 1000)
+            self._chunk_end_time_ms.append(int(chunk_end_time_ms))
 
     def snapshot_wav(self):
         with self._lock:
@@ -311,7 +317,6 @@ class _RollingAudioBuffer:
         with self._lock:
             chunks = list(self._chunks)
             sample_rate = self.sample_rate
-            channels = self.channels
         if not chunks:
             return []
         if max_seconds is None or not sample_rate:
@@ -319,6 +324,21 @@ class _RollingAudioBuffer:
         chunks_per_second = sample_rate / FRAMES_PER_BUFFER
         keep_chunks = max(1, int(math.ceil(float(max_seconds) * chunks_per_second)))
         return chunks[-keep_chunks:]
+
+    def snapshot_end_time_ms(self, max_seconds=None):
+        with self._lock:
+            chunk_end_time_ms = list(self._chunk_end_time_ms)
+            sample_rate = self.sample_rate
+        if not chunk_end_time_ms:
+            return None
+        if max_seconds is None or not sample_rate:
+            return int(chunk_end_time_ms[-1])
+        chunks_per_second = sample_rate / FRAMES_PER_BUFFER
+        keep_chunks = max(1, int(math.ceil(float(max_seconds) * chunks_per_second)))
+        selected = chunk_end_time_ms[-keep_chunks:]
+        if not selected:
+            return None
+        return int(selected[-1])
 
     def snapshot_pcm(self, max_seconds=None):
         # Returns one contiguous latest-window PCM payload for websocket upload.
@@ -359,6 +379,10 @@ def _latest_inference_snapshot_pcm() -> bytes:
         int(sample_rate or 0),
         int(channels or 0),
     )
+
+
+def _latest_inference_captured_time_ms() -> int | None:
+    return rolling_buffer.snapshot_end_time_ms(MIN_INFERENCE_SECONDS)
 
 
 def _latest_inference_replay_chunks() -> list[bytes]:
@@ -716,7 +740,7 @@ class _StreamingInferenceClient:
         self._available = True
         self._failure_count = 0
 
-    def _post_snapshot(self, pcm_bytes, event_name, replay_chunks_provider=None):
+    def _post_snapshot(self, pcm_bytes, event_name, replay_chunks_provider=None, captured_time_ms=None):
         if replay_chunks_provider is not None:
             self._replay_chunks_provider = replay_chunks_provider
         if self._inference_disabled:
@@ -743,9 +767,12 @@ class _StreamingInferenceClient:
         )
 
         try:
+            form_data = {'mode_form': self.mode}
+            if captured_time_ms is not None:
+                form_data['captured_time_ms'] = str(int(captured_time_ms))
             response = self._session.post(
                 self.api_url,
-                data={'mode_form': self.mode},
+                data=form_data,
                 files={'file': ('live_snapshot.wav', wav_bytes, 'audio/wav')},
                 timeout=(REST_CONNECT_TIMEOUT_SEC, REST_REQUEST_TIMEOUT_SEC),
             )
@@ -787,13 +814,18 @@ class _StreamingInferenceClient:
         if self._replay_chunks_provider is not None:
             replay_chunks = self._replay_chunks_provider()
             if replay_chunks:
-                self._post_snapshot(replay_chunks[-1], event_name='partial_result')
+                self._post_snapshot(
+                    replay_chunks[-1],
+                    event_name='partial_result',
+                    captured_time_ms=_latest_inference_captured_time_ms(),
+                )
 
     def send_chunk(self, pcm_bytes, replay_chunks_provider=None):
         return self._post_snapshot(
             pcm_bytes,
             event_name='partial_result',
             replay_chunks_provider=replay_chunks_provider,
+            captured_time_ms=_latest_inference_captured_time_ms(),
         )
 
     def finalize(self, replay_chunks_provider=None):
@@ -806,7 +838,12 @@ class _StreamingInferenceClient:
                 payload = replay_chunks[-1]
         if not payload:
             return
-        self._post_snapshot(payload, event_name='final_result', replay_chunks_provider=replay_chunks_provider)
+        self._post_snapshot(
+            payload,
+            event_name='final_result',
+            replay_chunks_provider=replay_chunks_provider,
+            captured_time_ms=_latest_inference_captured_time_ms(),
+        )
 
     def close(self):
         try:
@@ -921,7 +958,7 @@ class _CaptureManager:
                         LOGGER.warning("Capture stream read interrupted during shutdown", exc_info=True)
                         break
                     raise
-                rolling_buffer.push(data)
+                rolling_buffer.push(data, chunk_end_time_ms=int(time.time() * 1000))
                 audio_backend.on_chunk(data, sample_rate, channels)
                 if pending_started_at is None:
                     pending_started_at = time.monotonic()
@@ -1266,7 +1303,7 @@ def index():
                                     var(--bg);
                         color: var(--text);
                         font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-                        line-height: 1.4;
+                        line-height: 1.0;
                     }
 
                     body::before {
@@ -1419,7 +1456,7 @@ def index():
                         z-index: 1;
                         max-width: 860px;
                         margin: 0 auto;
-                        padding: 16px 16px;
+                        padding: 10px 10px;
                     }
 
                     .card {
@@ -1428,7 +1465,7 @@ def index():
                         background: linear-gradient(180deg, rgba(40, 44, 51, 0.77), rgba(40, 42, 46, 0.78));
                         border: 1px solid var(--border);
                         border-radius: 9px;
-                        padding: 20px 18px;
+                        padding: 16px 16px;
                         box-shadow: 0 18px 40px rgba(0, 0, 0, 0.24), inset 0 1px 0 rgba(255, 255, 255, 0.03);
                     }
 
@@ -1467,6 +1504,7 @@ def index():
                         position: relative;
                         overflow: hidden;
                         background: linear-gradient(135deg, rgba(93, 132, 182, 0.14), rgba(245, 143, 115, 0.096) 42%, rgba(143, 216, 139, 0.08));
+                        padding: 12px 14px;
                     }
 
                     .hero-card::before {
@@ -1487,7 +1525,7 @@ def index():
                     .hero-card-grid {
                         display: grid;
                         grid-template-columns: minmax(0, 1fr) auto;
-                        gap: 18px;
+                        gap: 8px;
                         align-items: center;
                         text-align: left;
                     }
@@ -1503,7 +1541,7 @@ def index():
                     }
 
                     .hero-logo {
-                        width: min(88px, 20.8vw);
+                        width: min(72px, 17vw);
                         height: auto;
                         display: block;
                         margin: 0;
@@ -1512,6 +1550,7 @@ def index():
                     @media (max-width: 640px) {
                         .hero-card-grid {
                             grid-template-columns: 1fr;
+                            gap: 6px;
                             text-align: center;
                         }
 
@@ -1533,11 +1572,11 @@ def index():
 
                     .row {
                         display: flex;
-                        gap: 12px;
+                        gap: 6px;
                         align-items: center;
                         justify-content: center;
                         flex-wrap: wrap;
-                        margin-top: 14px;
+                        margin-top: 6px;
                     }
 
                     button {
@@ -1656,9 +1695,20 @@ def index():
 
                     .label-inline-meta {
                         margin-left: 6px;
-                        color: var(--muted);
+                        # color: var(--muted);
                         font-size: 16px;
                         font-weight: 500;
+                    }
+
+                    .prediction-header {
+                        opacity: 0.7;
+                        margin-bottom: 12px;
+                    }
+
+                    .prediction-line {
+                        transition: opacity 200ms ease;
+                        opacity: 1;
+                        font-size: 18px;
                     }
 
                     .result-box {
@@ -1760,13 +1810,13 @@ def index():
                     </div>
                 </div>
                 <div class="wrap">
-                    <div class="card hero-card" style="margin-bottom: 16px; text-align: center;">
+                    <div class="card hero-card" style="margin-bottom: 12px; text-align: center;">
                         <div class="hero-card-overlay" aria-hidden="true"></div>
                         <div class="hero-card-grid">
                             <div class="hero-card-copy">
-                                <div style="font-size: 18px; font-weight: 700; letter-spacing: 0.1px;">🎧𝄞✮˚.⋆ Final Project: Music Genre Prediction using Lol-Mel & CNN ♬⋆.˚</div>
-                                <div style="color: var(--muted); font-size: 16px; margin-top: 4px;"><strong>By Nguyen Sy Hung, 2026</strong></div>
-                                <div style="color: var(--muted); font-size: 16px; margin-top: 4px;"><strong>Machine Learning 1, MLE501.22, FSB | Lecturer: PhD. Truc Thi Kim, Nguyen</strong></div>
+                                <div style="font-size: 16px; font-weight: 700; letter-spacing: 0.1px; line-height: 1.05;">🎧𝄞✮˚.⋆ Final Project: Music Genre Prediction using Lol-Mel & CNN ♬⋆.˚</div>
+                                <div style="color: var(--muted); font-size: 14px; margin-top: 3px;"><strong>By Nguyen Sy Hung, 2026</strong></div>
+                                <div style="color: var(--muted); font-size: 14px; margin-top: 3px;"><strong>Machine Learning 1, MLE501.22, FSB | Lecturer: PhD. Truc Thi Kim, Nguyen</strong></div>
                             </div>
                             <div class="hero-card-logo-column">
                                 <img class="hero-logo" src="{{ hero_logo_url }}" alt="Music Genre Prediction logo" />
@@ -1777,8 +1827,9 @@ def index():
                         <div class="row">
                             <button id="captureBtn">Capture</button>
                             <button id="retryBtn">Retry Inference</button>
-                            <span class="badge" id="statusBadge">Idle</span>
                             <span class="badge" id="wsBadge">API Idle</span>
+                            <span class="badge">Mode: <span id="modeLabel">---</span></span>
+                            <span class="badge" id="statusBadge">Idle</span>
                         </div>
 
                         <div class="row" style="margin-top: 16px;">
@@ -1786,19 +1837,18 @@ def index():
                         </div>
 
                         <div class="meter">
-                            <div class="meter-label">
+                            <!-- <div class="meter-label">
                                 <span>Audio Level</span>
-                                <span id="modeLabel">---</span>
-                            </div>
+                            </div> -->
                             <div class="bar">
                                 <div id="levelBar"></div>
                             </div>
                         </div>
 
                         <div class="result-box">
-                            <div class="label"><strong>Latest 15-Second Audio Prediction</strong><span class="label-inline-meta" id="partialPredictionAge"></span></div>
+                            <div class="label prediction-header"><strong>Latest 15-Second Audio Prediction</strong><span class="label-inline-meta" id="partialPredictionAge"></span></div>
                             <div class="prediction-fade-body" id="partialPredictionBody">
-                                <div class="value" id="partialPrediction">Waiting for inference...</div>
+                                <div class="value prediction-line" id="partialPrediction">Waiting for inference...</div>
                                 <div class="mono" id="partialTopK"></div>
                                 <div class="mono" id="partialTimestamp">---</div>
                             </div>
@@ -1813,10 +1863,9 @@ def index():
                         </div> -->
 
                         <div class="result-box">
-                            <div class="label">Genre Trend (180 Seconds)</div>
                             <canvas id="trendCanvas" class="trend-canvas"></canvas>
                             <div class="trend-legend mono" id="trendLegend">Waiting for trend data...</div>
-                        </div>
+                         </div>
 
 
                         <div class="grid">
@@ -1901,30 +1950,68 @@ def index():
                                     let partialPredictionTimestampValue = null;
                                     let partialPredictionFadeTimer = null;
                                     let partialPredictionAgeTimer = null;
+                                    const PARTIAL_PREDICTION_BLINK_OPACITY = 0.6;
+                                    const PARTIAL_PREDICTION_BLINK_PERIOD_MS = 160;
                                     const PARTIAL_PREDICTION_DIM_AFTER_15S_OPACITY = 0.85;
                                     const PARTIAL_PREDICTION_DIM_AFTER_30S_OPACITY = 0.70;
                                     const PARTIAL_PREDICTION_DIM_AFTER_45S_OPACITY = 0.40;
                                     const PARTIAL_PREDICTION_DIM_AFTER_60S_OPACITY = 0.20;
-                                    const trendPalette = ['#82D7DD', '#F58F73', '#8FD88B', '#EEA0B8', '#DDB85B', '#5D84B6', '#E8D6C8', '#4FA7A2', '#F4F0F2', '#C6E48B'];
+                                    const DEFAULT_LEAF_SELECTOR = '.leaf-set img';
+                                    const FALLING_ASSET_LAYER_COUNT = 3;
+                                    const FALLING_ASSET_IMAGES_PER_LAYER = 8;
+                                    const FALLING_ASSET_LIBRARY = {
+                                        'Rock': ['rock1.png', 'rock2.png', 'rock3.png', 'rock4.png'],
+                                        'Metal': ['metal1.png', 'metal2.png', 'metal3.png', 'metal4.png'],
+                                        'Hip-Hop': ['hip-hop1.png', 'hip-hop2.png', 'hip-hop3.png', 'hip-hop4.png'],
+                                        'Pop': ['pop1.png', 'pop2.png', 'pop3.png', 'pop4.png'],
+                                        'Country': ['country1.png', 'country2.png', 'country3.png', 'country4.png'],
+                                        'Classical': ['classical.png', 'classical2.png', 'classical3.png', 'classical4.png'],
+                                        'Jazz': ['jazz1.png', 'jazz2.png', 'jazz3.png', 'jazz4.png'],
+                                        'Blues': ['blues1.png', 'blues2.png', 'blues3.png', 'blues4.png'],
+                                        'Bolero': ['bolero2.png', 'bolero3.png', 'bolero4.png'],
+                                        'Speech': [],
+                                    };
+                                    const trendPalette = ['#3574a1', '#F58F73', '#7eb37b', '#916240', '#795e8a', '#5D84B6', '#852a3a', '#cf9717', '#ba2a1a', '#636363'];
+                                    let defaultFallingAssetSets = [];
+                                    let activeFallingGenreKey = null;
+                                    let fallingAssetRequestId = 0;
 
                                     function parseTimestampMs(value) {
-                                        if (!value) return null;
-                                        const parsed = Date.parse(value);
+                                        if (value === null || value === undefined || value === '') return null;
+                                        if (typeof value === 'number' && Number.isFinite(value)) return value;
+
+                                        const raw = String(value).trim();
+                                        if (/^\d{13}$/.test(raw)) return Number(raw);
+                                        if (/^\d{10}$/.test(raw)) return Number(raw) * 1000;
+
+                                        const localMatch = raw.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?$/);
+                                        if (localMatch) {
+                                            const [, year, month, day, hour, minute, second, millisecond] = localMatch;
+                                            return new Date(
+                                                Number(year),
+                                                Number(month) - 1,
+                                                Number(day),
+                                                Number(hour),
+                                                Number(minute),
+                                                Number(second),
+                                                Number((millisecond || '0').padEnd(3, '0')),
+                                            ).getTime();
+                                        }
+
+                                        const parsed = Date.parse(raw);
                                         return Number.isFinite(parsed) ? parsed : null;
                                     }
 
-                                    function formatLocalTimestamp(value) {
+                                    function formatLocalTimestamp(value, includeMilliseconds = false) {
                                         if (!value) return '---';
-                                        const raw = String(value);
-                                        if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(raw)) {
-                                            return raw;
-                                        }
-
-                                        const parsed = new Date(raw);
-                                        if (Number.isNaN(parsed.getTime())) return raw;
+                                        const parsedMs = parseTimestampMs(value);
+                                        if (parsedMs === null) return String(value);
+                                        const parsed = new Date(parsedMs);
 
                                         const pad2 = number => String(number).padStart(2, '0');
-                                        return `${parsed.getFullYear()}-${pad2(parsed.getMonth() + 1)}-${pad2(parsed.getDate())} ${pad2(parsed.getHours())}:${pad2(parsed.getMinutes())}:${pad2(parsed.getSeconds())}`;
+                                        const base = `${parsed.getFullYear()}-${pad2(parsed.getMonth() + 1)}-${pad2(parsed.getDate())} ${pad2(parsed.getHours())}:${pad2(parsed.getMinutes())}:${pad2(parsed.getSeconds())}`;
+                                        if (!includeMilliseconds) return base;
+                                        return `${base}.${String(parsed.getMilliseconds()).padStart(3, '0')}`;
                                     }
 
                                     function formatPredictionAgeLabel(timestampValue, nowMs = Date.now()) {
@@ -1952,6 +2039,11 @@ def index():
                                     function computePartialPredictionOpacity(nowMs) {
                                         if (!partialPredictionUpdatedAtMs) return 1;
                                         const ageMs = Math.max(0, nowMs - partialPredictionUpdatedAtMs);
+                                        if (ageMs < 15 * 1000) {
+                                            return Math.floor(nowMs / PARTIAL_PREDICTION_BLINK_PERIOD_MS) % 2 === 0
+                                                ? 1
+                                                : PARTIAL_PREDICTION_BLINK_OPACITY;
+                                        }
                                         if (ageMs > 60 * 1000) return PARTIAL_PREDICTION_DIM_AFTER_60S_OPACITY;
                                         if (ageMs > 45 * 1000) return PARTIAL_PREDICTION_DIM_AFTER_45S_OPACITY;
                                         if (ageMs > 30 * 1000) return PARTIAL_PREDICTION_DIM_AFTER_30S_OPACITY;
@@ -1960,14 +2052,14 @@ def index():
                                     }
 
                                     function applyPartialPredictionFade() {
-                                        if (!partialPredictionBody) return;
+                                        if (!partialPrediction) return;
                                         const opacity = computePartialPredictionOpacity(Date.now());
-                                        partialPredictionBody.style.opacity = opacity.toFixed(3);
+                                        partialPrediction.style.opacity = opacity.toFixed(3);
                                     }
 
                                     function ensurePartialPredictionFadeTimer() {
                                         if (partialPredictionFadeTimer) return;
-                                        partialPredictionFadeTimer = setInterval(applyPartialPredictionFade, 1000);
+                                        partialPredictionFadeTimer = setInterval(applyPartialPredictionFade, 250);
                                     }
 
                                     function formatTopK(items) {
@@ -1982,6 +2074,130 @@ def index():
                                         // the original genre value in the underlying data.
                                         if (g === 'Borelo' || g === 'Bolero') return 'Borelo Việt Nam';
                                         return g;
+                                    }
+
+                                    function normalizeGenreKey(genre) {
+                                        if (!genre && genre !== 0) return '';
+                                        const g = String(genre).trim();
+                                        if (g === 'Borelo') return 'Bolero';
+                                        return g;
+                                    }
+
+                                    function formatDecoratedGenreLabel(genre) {
+                                        const label = mapGenreLabel(genre) || '---';
+                                        const emojis = getGenreEmojiSuffix(genre);
+                                        return emojis ? `${label} ${emojis}` : label;
+                                    }
+
+                                    function getGenreEmojiSuffix(genre) {
+                                        const emojiMap = {
+                                            'Rock': '🤘🏼 🎸',
+                                            'Metal': '🤘🏼 🎸 😈 💀',
+                                            'Hip-Hop': '📀 🎧 🤸🏾 📼',
+                                            'Pop': '✨ 🎤 🎵',
+                                            'Country': '🎸 𐚁 👢 🐎',
+                                            'Classical': '🎻',
+                                            'Jazz': '🎷🎺 ♪♫',
+                                            'Blues': '🎸♬🍸🌃',
+                                            'Bolero': '𝄞 🎭 🍂 🌿',
+                                            'Speech': '🗣 💬',
+                                        };
+                                        return emojiMap[normalizeGenreKey(genre)] || '';
+                                    }
+
+                                    function formatDecoratedGenreLabelHtml(genre) {
+                                        const label = mapGenreLabel(genre) || '---';
+                                        const emojis = getGenreEmojiSuffix(genre);
+                                        return emojis ? `<strong>${label}</strong> ${emojis}` : `<strong>${label}</strong>`;
+                                    }
+
+                                    function captureDefaultFallingAssetSets() {
+                                        if (defaultFallingAssetSets.length) return;
+                                        defaultFallingAssetSets = Array.from(document.querySelectorAll('.leaf-set')).map(layerElement =>
+                                            Array.from(layerElement.querySelectorAll('img')).map(img => img.getAttribute('src') || '')
+                                        );
+                                    }
+
+                                    function getFallingAssetFilenamesForGenre(genre) {
+                                        const key = normalizeGenreKey(genre);
+                                        return FALLING_ASSET_LIBRARY[key] || [];
+                                    }
+
+                                    function expandAssetList(filenames, count) {
+                                        if (!filenames.length) return [];
+                                        const urls = [];
+                                        for (let idx = 0; idx < count; idx++) {
+                                            const filename = filenames[idx % filenames.length];
+                                            urls.push(`/demo-assets/${filename}`);
+                                        }
+                                        return urls;
+                                    }
+
+                                    function buildFallingAssetSetsForGenre(genre) {
+                                        const filenames = getFallingAssetFilenamesForGenre(genre);
+                                        if (!filenames.length) return null;
+
+                                        return Array.from({ length: FALLING_ASSET_LAYER_COUNT }, (_, layerIndex) => {
+                                            const rotated = filenames.map((_, idx) => filenames[(idx + layerIndex) % filenames.length]);
+                                            return expandAssetList(rotated, FALLING_ASSET_IMAGES_PER_LAYER);
+                                        });
+                                    }
+
+                                    function applyFallingAssetSets(assetSets) {
+                                        if (!Array.isArray(assetSets) || !assetSets.length) return;
+                                        const layers = document.querySelectorAll('.leaf-set');
+                                        layers.forEach((layerElement, layerIndex) => {
+                                            const urls = assetSets[layerIndex] || [];
+                                            const images = layerElement.querySelectorAll('img');
+                                            images.forEach((img, imageIndex) => {
+                                                if (urls[imageIndex]) {
+                                                    img.src = urls[imageIndex];
+                                                }
+                                            });
+                                        });
+                                    }
+
+                                    function restoreDefaultFallingAssets() {
+                                        if (!defaultFallingAssetSets.length) return;
+                                        applyFallingAssetSets(defaultFallingAssetSets);
+                                        activeFallingGenreKey = null;
+                                    }
+
+                                    function preloadImage(url) {
+                                        return new Promise(resolve => {
+                                            const image = new Image();
+                                            image.onload = () => resolve(true);
+                                            image.onerror = () => resolve(false);
+                                            image.src = url;
+                                        });
+                                    }
+
+                                    async function updateFallingAssetsForGenre(genre) {
+                                        const normalizedGenre = normalizeGenreKey(genre);
+                                        if (!normalizedGenre) {
+                                            restoreDefaultFallingAssets();
+                                            return;
+                                        }
+                                        if (activeFallingGenreKey === normalizedGenre) return;
+
+                                        const assetSets = buildFallingAssetSetsForGenre(normalizedGenre);
+                                        if (!assetSets) {
+                                            restoreDefaultFallingAssets();
+                                            return;
+                                        }
+
+                                        const requestId = ++fallingAssetRequestId;
+
+                                        applyFallingAssetSets(assetSets);
+                                        activeFallingGenreKey = normalizedGenre;
+
+                                        const loaded = await Promise.all(assetSets.flat().map(preloadImage));
+                                        if (requestId !== fallingAssetRequestId) return;
+
+                                        if (!loaded.every(Boolean)) {
+                                            restoreDefaultFallingAssets();
+                                            return;
+                                        }
                                     }
 
                                     function renderGenreNotesMap(notesMap) {
@@ -2107,7 +2323,7 @@ def index():
                                         const legendHtml = Array.from(seriesMap.entries())
                                             .map(([genre, series]) => `<span class="trend-chip"><span class="trend-chip-swatch" style="background:${series.color}"></span>${mapGenreLabel(genre)}</span>`)
                                             .join('');
-                                        trendLegend.innerHTML = legendHtml || 'Waiting for trend data...';
+                                        trendLegend.innerHTML = `<span class="trend-chip">Genre Trend (180 Seconds):</span> ${legendHtml || 'Waiting for trend data...'}`;
                                     }
 
                                     function updateInferenceUI(data) {
@@ -2135,17 +2351,19 @@ def index():
                                         const partial = data.last_partial;
                                         if (partial) {
                                             const warmup = partial.is_warmup ? ' [warmup]' : '';
-                                            partialPredictionTimestampValue = partial.timestamp || null;
+                                            const capturedTimeValue = partial.captured_time_ms || partial.timestamp || null;
+                                            partialPredictionTimestampValue = capturedTimeValue;
                                             if (partialPrediction) {
-                                                partialPrediction.textContent = `${mapGenreLabel(partial.genre)} (${(partial.confidence * 100).toFixed(1)}%)${warmup}`;
+                                                partialPrediction.innerHTML = `${formatDecoratedGenreLabelHtml(partial.genre)} (${(partial.confidence * 100).toFixed(1)}%)${warmup}`;
                                             }
+                                            updateFallingAssetsForGenre(partial.genre);
                                             if (partialTopK) {
                                                 partialTopK.textContent = formatTopK(partial.top_k);
                                             }
                                             if (partialTimestamp) {
-                                                partialTimestamp.textContent = `Timestamp: ${formatLocalTimestamp(partial.timestamp)}`;
+                                                partialTimestamp.textContent = `Captured time: ${formatLocalTimestamp(capturedTimeValue, true)}`;
                                             }
-                                            partialPredictionUpdatedAtMs = parseTimestampMs(partial.timestamp) || Date.now();
+                                            partialPredictionUpdatedAtMs = parseTimestampMs(capturedTimeValue) || Date.now();
                                             applyPartialPredictionFade();
                                             ensurePartialPredictionFadeTimer();
                                             updatePartialPredictionAgeLabel();
@@ -2161,7 +2379,7 @@ def index():
                                                 finalTopK.textContent = formatTopK(final.top_k);
                                             }
                                             if (finalTimestamp) {
-                                                finalTimestamp.textContent = `Timestamp: ${formatLocalTimestamp(final.timestamp)}`;
+                                                finalTimestamp.textContent = `Captured time: ${formatLocalTimestamp(final.captured_time_ms || final.timestamp || null, true)}`;
                                             }
                                         }
 
@@ -2387,6 +2605,8 @@ def index():
                                     });
 
                                     // Initial state: not capturing; playback enabled.
+                                    captureDefaultFallingAssetSets();
+                                    restoreDefaultFallingAssets();
                                     setCapturingUI(false);
                                     applyPartialPredictionFade();
                                     ensurePartialPredictionFadeTimer();
