@@ -2010,7 +2010,7 @@ def index():
                                         'Hip-Hop': ['hip-hop1.png', 'hip-hop2.png', 'hip-hop3.png', 'hip-hop4.png'],
                                         'Pop': ['pop1.png', 'pop2.png', 'pop3.png', 'pop4.png'],
                                         'Country': ['country1.png', 'country2.png', 'country3.png', 'country4.png'],
-                                        'Classical': ['classical.png', 'classical2.png', 'classical3.png', 'classical4.png'],
+                                        'Classical': ['classical1.png', 'classical2.png', 'classical3.png', 'classical4.png'],
                                         'Jazz': ['jazz1.png', 'jazz2.png', 'jazz3.png', 'jazz4.png'],
                                         'Blues': ['blues1.png', 'blues2.png', 'blues3.png', 'blues4.png'],
                                         'Bolero': ['bolero2.png', 'bolero3.png', 'bolero4.png'],
