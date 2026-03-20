@@ -1855,7 +1855,7 @@ def index():
                         <div class="hero-card-overlay" aria-hidden="true"></div>
                         <div class="hero-card-grid">
                             <div class="hero-card-copy">
-                                <div style="font-size: 16px; font-weight: 700; letter-spacing: 0.1px; line-height: 1.05;">🎧𝄞✮˚.⋆ Final Project: Music Genre Prediction using Log-Mel & CNN ♬⋆.˚</div>
+                                <div style="font-size: 18px; font-weight: 700; letter-spacing: 0.1px; line-height: 1.05;">🎧𝄞✮˚.⋆ Final Project: Music Genre Prediction using Log-Mel & CNN ♬⋆.˚</div>
                                 <div style="font-size: 14px; margin-top: 6px;"><strong>by Nguyen Sy Hung, 2026</strong></div>
                                 <div style="color: var(--muted); font-size: 14px; margin-top: 6px;"><strong>Machine Learning 1, MLE501.22, FSB | Lecturer: PhD. Truc Thi Kim, Nguyen</strong></div>
                             </div>
