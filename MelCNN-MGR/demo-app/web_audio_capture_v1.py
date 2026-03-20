@@ -1887,7 +1887,7 @@ def index():
                             <div class="prediction-fade-body" id="partialPredictionBody">
                                 <div class="value prediction-line" style="margin-bottom: 6px;">
                                   <span id="partialPrediction">Waiting for inference...</span> *
-                                  <span style="color: var(--muted); font-size: 14px;" id="partialTopK"></span>
+                                  <span style="color: var(--muted); font-size: 12px;" id="partialTopK"></span>
                                 </div>
                                 
                                 <div style="color: var(--muted);" class="mono" id="partialTimestamp">---</div>
@@ -1996,10 +1996,11 @@ def index():
                                     let partialPredictionAgeTimer = null;
                                     const PARTIAL_PREDICTION_BLINK_OPACITY = 0.6;
                                     const PARTIAL_PREDICTION_BLINK_PERIOD_MS = 130;
-                                    const PARTIAL_PREDICTION_DIM_AFTER_8S_OPACITY = 0.70;
-                                    const PARTIAL_PREDICTION_DIM_AFTER_15S_OPACITY = 0.50;
-                                    const PARTIAL_PREDICTION_DIM_AFTER_45S_OPACITY = 0.30;
-                                    const PARTIAL_PREDICTION_DIM_AFTER_60S_OPACITY = 0.20;
+                                    const PARTIAL_PREDICTION_DIM_AFTER_3S_OPACITY = 0.60;
+                                    const PARTIAL_PREDICTION_DIM_AFTER_6S_OPACITY = 0.40;
+                                    const PARTIAL_PREDICTION_DIM_AFTER_15S_OPACITY = 0.30;
+                                    const PARTIAL_PREDICTION_DIM_AFTER_45S_OPACITY = 0.20;
+                                    const PARTIAL_PREDICTION_DIM_AFTER_60S_OPACITY = 0.15;
                                     const DEFAULT_LEAF_SELECTOR = '.leaf-set img';
                                     const FALLING_ASSET_LAYER_COUNT = 3;
                                     const FALLING_ASSET_IMAGES_PER_LAYER = 8;
@@ -2086,7 +2087,7 @@ def index():
                                     function computePartialPredictionLineOpacity(nowMs) {
                                         if (!partialPredictionUpdatedAtMs) return 1;
                                         const ageMs = Math.max(0, nowMs - partialPredictionUpdatedAtMs);
-                                        if (ageMs <= 8 * 1000) {
+                                        if (ageMs <= 3 * 1000) {
                                             return Math.floor(nowMs / PARTIAL_PREDICTION_BLINK_PERIOD_MS) % 2 === 0
                                                 ? 1
                                                 : PARTIAL_PREDICTION_BLINK_OPACITY;
@@ -2100,7 +2101,8 @@ def index():
                                         if (ageMs > 60 * 1000) return PARTIAL_PREDICTION_DIM_AFTER_60S_OPACITY;
                                         if (ageMs > 45 * 1000) return PARTIAL_PREDICTION_DIM_AFTER_45S_OPACITY;
                                         if (ageMs > 15 * 1000) return PARTIAL_PREDICTION_DIM_AFTER_15S_OPACITY;
-                                        if (ageMs > 8 * 1000) return PARTIAL_PREDICTION_DIM_AFTER_8S_OPACITY;
+                                        if (ageMs > 6 * 1000) return PARTIAL_PREDICTION_DIM_AFTER_6S_OPACITY;
+                                        if (ageMs > 3 * 1000) return PARTIAL_PREDICTION_DIM_AFTER_3S_OPACITY;
                                         return 1;
                                     }
 
