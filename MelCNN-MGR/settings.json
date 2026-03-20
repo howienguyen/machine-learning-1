@@ -12,14 +12,14 @@
 			"Bolero",
 			"Speech"
 		],
-		"number_of_samples_expected_each_genre": 2300,
+		"number_of_samples_expected_each_genre": 3200,
 		"additional_samples_contribution_ratio_expected_each_genre": 0.7,
         "train_n_val_test_split_ratio_each_genre": 0.7,
-		"sample_length_sec": 15,
+		"sample_length_sec": 10,
 		"min_duration_delta": 0.001
 	},
 	"model_inference_settings": {
-		"model_name": "logmel-cnn-v2_4-cuda-tf-20260318-104959"
+		"model_name": "logmel-cnn-v2_4-cuda-tf-20260319-155604"
 	}
 }
 

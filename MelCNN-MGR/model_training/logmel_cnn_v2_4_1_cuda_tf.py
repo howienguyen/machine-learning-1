@@ -278,10 +278,10 @@ NORMALIZATION_EPS = 1e-6
 NORMALIZATION_STRATEGY = "train_only_per_mel_bin_standardization"
 ENABLE_TRAIN_EVAL_METRICS = False   # extra full clean-train evaluation each epoch; expensive, so disabled by default
 DATASET_PARALLELISM_MODE = "fixed"  # safe default; set to "autotune" only for experiments, as it may be unstable on some TF/CUDA runs
-DATASET_FIXED_NUM_PARALLEL_CALLS = 6
-DATASET_FIXED_NUM_PARALLEL_READS = 6
+DATASET_FIXED_NUM_PARALLEL_CALLS = 2
+DATASET_FIXED_NUM_PARALLEL_READS = 2
 DATASET_PREFETCH_MODE = "fixed"  # safe default; set to "autotune" only for experiments when memory headroom is acceptable
-DATASET_FIXED_PREFETCH_BUFFER_SIZE = 3
+DATASET_FIXED_PREFETCH_BUFFER_SIZE = 2
 DATASET_AUTOTUNE_RAM_BUDGET_BYTES = 2 * 1024 * 1024 * 1024 * 1.5  # default 2 * 1.5 GiB tf.data autotune budget; set to None to use TensorFlow's default budget
 
 

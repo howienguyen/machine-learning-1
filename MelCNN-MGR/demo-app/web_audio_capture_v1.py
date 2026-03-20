@@ -79,8 +79,34 @@ INFERENCE_CHANNELS = 1
 # back to other device-supported formats if needed.
 PREFERRED_CAPTURE_SAMPLE_RATES = (48000, 44100, 22050)
 PREFERRED_CAPTURE_CHANNELS = (2, 1)
-# Model inference contract currently requires a full 15-second window.
-MIN_INFERENCE_SECONDS = 15.0
+SETTINGS_PATH = WORKSPACE_ROOT / "MelCNN-MGR" / "settings.json"
+
+
+def _load_min_inference_seconds(settings_path: Path) -> float:
+    default_seconds = 10.0
+    try:
+        payload = json.loads(settings_path.read_text())
+    except Exception:
+        return default_seconds
+
+    config = payload.get("data_sampling_settings")
+    if not isinstance(config, dict):
+        return default_seconds
+
+    sample_length_sec = config.get("sample_length_sec")
+    if not isinstance(sample_length_sec, (int, float)) or sample_length_sec <= 0:
+        return default_seconds
+
+    return float(sample_length_sec)
+
+
+def _format_seconds_label(seconds: float) -> str:
+    return f"{seconds:g}"
+
+
+# Model inference contract currently requires a full n-second window.
+MIN_INFERENCE_SECONDS = _load_min_inference_seconds(SETTINGS_PATH)
+
 # Inference service REST endpoint consumed by this capture client. If only a
 # websocket URL is provided, it is converted to the matching /predict URL.
 def _resolve_inference_api_url() -> str:
@@ -107,20 +133,20 @@ INFERENCE_MODE = "single_crop"
 # Server-side partial-result cadence once a full latest-window snapshot is available.
 EMIT_INTERVAL_SEC = 1
 # Client-side cadence for sending the latest MIN_INFERENCE_SECONDS snapshot to the service.
-SEND_INTERVAL_SEC = 8
+SEND_INTERVAL_SEC = 6
 # REST connect timeout for service probes and inference requests.
 REST_CONNECT_TIMEOUT_SEC = 15.0
 
 # REST response timeout for inference requests.
-REST_REQUEST_TIMEOUT_SEC = 30.0
+REST_REQUEST_TIMEOUT_SEC = 15.0
 
 # Background retry cadence used when the inference service is unavailable.
 RECONNECT_RETRY_INTERVAL_SEC = 10
 # Maximum number of consecutive reconnect attempts before inference is disabled for the current capture session.
 RECONNECT_MAX_ATTEMPTS = 6
 # Amount of recent PCM to replay after reconnect so the service can restore one full inference window.
-RECONNECT_REPLAY_SECONDS = 15.0
-MAX_GENRE_RESULT_NOTES = 8
+RECONNECT_REPLAY_SECONDS = 10.0
+MAX_GENRE_RESULT_NOTES = 6
 TREND_WINDOW_SECONDS = 180
 MAX_TREND_HISTORY_POINTS = 512
 DEMO_APP_IMAGES_DIR = (WORKSPACE_ROOT / "MelCNN-MGR" / "demo-app" / "images").resolve()
@@ -1710,17 +1736,20 @@ def index():
                         # color: var(--muted);
                         font-size: 16px;
                         font-weight: 500;
+                        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
                     }
 
                     .prediction-header {
                         opacity: 0.7;
                         margin-bottom: 12px;
+                        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
                     }
 
                     .prediction-line {
                         transition: opacity 200ms ease;
                         opacity: 1;
-                        font-size: 18px;
+                        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+                        font-size: 16px;
                     }
 
                     .result-box {
@@ -1739,7 +1768,7 @@ def index():
 
                     .mono {
                         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-                        font-size: 12px;
+                        font-size: 14px;
                     }
 
                     .notes-list {
@@ -1826,7 +1855,7 @@ def index():
                         <div class="hero-card-overlay" aria-hidden="true"></div>
                         <div class="hero-card-grid">
                             <div class="hero-card-copy">
-                                <div style="font-size: 16px; font-weight: 700; letter-spacing: 0.1px; line-height: 1.05;">🎧𝄞✮˚.⋆ Final Project: Music Genre Prediction using Lol-Mel & CNN ♬⋆.˚</div>
+                                <div style="font-size: 16px; font-weight: 700; letter-spacing: 0.1px; line-height: 1.05;">🎧𝄞✮˚.⋆ Final Project: Music Genre Prediction using Log-Mel & CNN ♬⋆.˚</div>
                                 <div style="font-size: 14px; margin-top: 6px;"><strong>by Nguyen Sy Hung, 2026</strong></div>
                                 <div style="color: var(--muted); font-size: 14px; margin-top: 6px;"><strong>Machine Learning 1, MLE501.22, FSB | Lecturer: PhD. Truc Thi Kim, Nguyen</strong></div>
                             </div>
@@ -1854,11 +1883,14 @@ def index():
                         </div>
 
                         <div class="result-box">
-                            <div class="label prediction-header"><strong>Latest 15-Second Audio Prediction</strong><span class="label-inline-meta" id="partialPredictionAge"></span></div>
+                            <div class="label prediction-header"><strong>{{ latest_prediction_label }}</strong><span class="label-inline-meta" id="partialPredictionAge"></span></div>
                             <div class="prediction-fade-body" id="partialPredictionBody">
-                                <div style="margin-bottom: 6px;" class="value prediction-line" id="partialPrediction">Waiting for inference...</div>
-                                <div class="mono" id="partialTopK"></div>
-                                <div class="mono" id="partialTimestamp">---</div>
+                                <div class="value prediction-line" style="margin-bottom: 6px;">
+                                  <span id="partialPrediction">Waiting for inference...</span> *
+                                  <span style="color: var(--muted); font-size: 14px;" id="partialTopK"></span>
+                                </div>
+                                
+                                <div style="color: var(--muted);" class="mono" id="partialTimestamp">---</div>
                             </div>
                         </div>
 
@@ -2076,6 +2108,9 @@ def index():
                                         if (partialPrediction) {
                                             const lineOpacity = computePartialPredictionLineOpacity(Date.now());
                                             partialPrediction.style.opacity = lineOpacity.toFixed(3);
+                                            if (partialTopK) {
+                                                partialTopK.style.opacity = lineOpacity.toFixed(3);
+                                            }
                                         }
                                         if (partialPredictionBody) {
                                             const bodyOpacity = computePartialPredictionBodyOpacity(Date.now());
@@ -2096,7 +2131,7 @@ def index():
                                     function formatSecondaryTopK(items) {
                                         if (!items || items.length < 2) return '---';
                                         const secondItem = items[1];
-                                        return `${mapGenreLabel(secondItem.genre)} (${(secondItem.probability * 100).toFixed(1)}%)`;
+                                        return `${mapGenreLabel(secondItem.genre)} (${Number(secondItem.probability).toFixed(2)})`;
                                     }
 
                                     function mapGenreLabel(genre) {
@@ -2427,7 +2462,7 @@ def index():
                                             partialPredictionTimestampValue = capturedTimeValue;
                                             syncPredictionGenreState(partial.genre);
                                             if (partialPrediction) {
-                                                partialPrediction.innerHTML = `${formatDecoratedGenreLabelHtml(partial.genre)} (${(partial.confidence * 100).toFixed(1)}%)${warmup}`;
+                                                partialPrediction.innerHTML = `${formatDecoratedGenreLabelHtml(partial.genre)} (${Number(partial.confidence).toFixed(2)})${warmup}`;
                                             }
                                             if (partialTopK) {
                                                 partialTopK.textContent = formatSecondaryTopK(partial.top_k);
@@ -2690,7 +2725,7 @@ def index():
                 </script>
             </body>
         </html>
-    ''', app_icon_url=_demo_asset_url('app_icon.png'), hero_logo_url=_demo_asset_url('headphone1.png'), hero_bg_url=_demo_asset_url('hero_background.png'), falling_asset_sets=falling_asset_sets)
+    ''', app_icon_url=_demo_asset_url('app_icon.png'), hero_logo_url=_demo_asset_url('headphone1.png'), hero_bg_url=_demo_asset_url('hero_background.png'), falling_asset_sets=falling_asset_sets, latest_prediction_label=f"Latest {_format_seconds_label(MIN_INFERENCE_SECONDS)}-Seconds Audio Prediction")
 
 if __name__ == "__main__":
     # Threaded=True is required so the web server can serve the UI and the stream simultaneously
