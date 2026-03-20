@@ -154,7 +154,7 @@ DEFAULT_OUT_ROOT = Path("/home/hsnguyen") / "model-training-data-cache" / f"logm
 DEFAULT_NUM_WORKERS = min(4, (os.cpu_count() or 6))
 
 DEFAULT_SAMPLE_RATE = 22050
-DEFAULT_N_MELS = 192
+DEFAULT_N_MELS = 192  # for 10s-at-22050Hz, n_fft=512, hop_length=256, gives 192x862 log-mel shape with 1 frame of padding to reach 192x863 final shape
 DEFAULT_N_FFT = 512
 DEFAULT_HOP_LENGTH = 256
 DEFAULT_MIN_SECONDS = 1.0

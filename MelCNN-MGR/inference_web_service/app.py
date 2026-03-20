@@ -29,7 +29,9 @@ curl -X POST http://127.0.0.1:8000/predict_json \
 from __future__ import annotations
 
 import argparse
+import asyncio
 import base64
+from contextlib import asynccontextmanager, suppress
 import importlib.util
 import json
 import logging
@@ -80,6 +82,81 @@ DEFAULT_WS_PING_TIMEOUT = 20.0
 TMP_AUDIO_DIR = (MELCNN_DIR / "data" / "tmp_inference").resolve()
 MAX_SAVED_AUDIO_CLIPS = 10
 SAVE_LATEST_AUDIO_CLIPS = False
+
+
+def _new_warmup_status() -> dict[str, Any]:
+    return {
+        "ready": False,
+        "warming_up": False,
+        "started_at": None,
+        "completed_at": None,
+        "duration_sec": None,
+        "last_error": None,
+    }
+
+
+def _warmup_payload(status: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "ready": bool(status.get("ready", False)),
+        "warming_up": bool(status.get("warming_up", False)),
+        "started_at": status.get("started_at"),
+        "completed_at": status.get("completed_at"),
+        "duration_sec": status.get("duration_sec"),
+        "last_error": status.get("last_error"),
+    }
+
+
+def _run_engine_warmup(engine: LogMelCNNV2XInference) -> None:
+    warmup_samples = int(round(engine.sample_rate * engine.clip_duration))
+    warmup_waveform = np.zeros((warmup_samples,), dtype=np.float32)
+    engine.predict_waveform(
+        warmup_waveform,
+        sr=engine.sample_rate,
+        mode="single_crop",
+        source_name="<startup-warmup>",
+    )
+
+
+async def _warmup_engine_task(engine: LogMelCNNV2XInference, status: dict[str, Any]) -> None:
+    started_at = time.time()
+    status.update(
+        {
+            "ready": False,
+            "warming_up": True,
+            "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(started_at)),
+            "completed_at": None,
+            "duration_sec": None,
+            "last_error": None,
+        }
+    )
+    LOGGER.info("Warm-up started sample_rate=%s clip_duration=%.3f", engine.sample_rate, engine.clip_duration)
+    try:
+        await asyncio.to_thread(_run_engine_warmup, engine)
+    except Exception as exc:
+        finished_at = time.time()
+        status.update(
+            {
+                "ready": False,
+                "warming_up": False,
+                "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(finished_at)),
+                "duration_sec": round(finished_at - started_at, 3),
+                "last_error": str(exc),
+            }
+        )
+        LOGGER.exception("Warm-up failed")
+        return
+
+    finished_at = time.time()
+    status.update(
+        {
+            "ready": True,
+            "warming_up": False,
+            "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(finished_at)),
+            "duration_sec": round(finished_at - started_at, 3),
+            "last_error": None,
+        }
+    )
+    LOGGER.info("Warm-up completed duration_sec=%.3f", finished_at - started_at)
 
 
 def _ws_payload_summary(payload: dict[str, Any]) -> str:
@@ -392,8 +469,23 @@ def create_app(
         engine.normalization_info.get("resolved_type"),
     )
 
-    app = FastAPI(title="Log-Mel CNN v2.x Family Inference Service")
-    app.state.engine = engine
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        app.state.engine = engine
+        app.state.warmup_status = _new_warmup_status()
+        app.state.warmup_task = asyncio.create_task(
+            _warmup_engine_task(app.state.engine, app.state.warmup_status)
+        )
+        try:
+            yield
+        finally:
+            warmup_task = getattr(app.state, "warmup_task", None)
+            if warmup_task is not None and not warmup_task.done():
+                warmup_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await warmup_task
+
+    app = FastAPI(title="Log-Mel CNN v2.x Family Inference Service", lifespan=lifespan)
 
     @app.get("/health")
     async def health() -> Any:
@@ -410,6 +502,18 @@ def create_app(
             "n_classes": engine.n_classes,
             "normalization": engine.normalization_info,
         }
+
+    @app.get("/ready")
+    async def readiness() -> Any:
+        warmup_status = _warmup_payload(app.state.warmup_status)
+        payload = {
+            "status": "ready" if warmup_status["ready"] else "not_ready",
+            "service": "logmel-cnn-v2_x-family-inference",
+            "warmup": warmup_status,
+        }
+        if warmup_status["ready"]:
+            return payload
+        return JSONResponse(status_code=503, content=payload)
 
     @app.get("/model")
     async def model_info() -> Any:

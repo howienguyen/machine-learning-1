@@ -1,0 +1,6 @@
+{
+  "type": "train_only_per_mel_bin_standardization",
+  "computed_from": "train_split_only",
+  "n_mels": 192,
+  "epsilon": 1e-06
+}
