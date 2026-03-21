@@ -193,6 +193,19 @@ CLI_PARSER.add_argument(
     default=None,
     help="Freeze transferred backbone layers for the first N epochs after backbone_only initialization.",
 )
+CLI_PARSER.add_argument(
+    "--enable-train-eval-metrics",
+    dest="enable_train_eval_metrics",
+    action="store_true",
+    help="Run a clean train-set evaluation at the end of each epoch so train accuracy and train macro-F1 are recorded in logs and the run report.",
+)
+CLI_PARSER.add_argument(
+    "--disable-train-eval-metrics",
+    dest="enable_train_eval_metrics",
+    action="store_false",
+    help="Skip end-of-epoch clean train-set evaluation to reduce runtime at the cost of missing train macro-F1 and gap-aware stopping metrics.",
+)
+CLI_PARSER.set_defaults(enable_train_eval_metrics=False)
 CLI_ARGS, _CLI_UNKNOWN = CLI_PARSER.parse_known_args()
 
 
@@ -276,7 +289,7 @@ SPATIAL_DROPOUT_RATE_BLOCK5 = 0.20  # v2.1: graduated — strongest in deepest l
 FINAL_DROPOUT_RATE = 0.20           # v2.1: 0.20 (was v2: 0.25) — wider bottleneck absorbs capacity
 NORMALIZATION_EPS = 1e-6
 NORMALIZATION_STRATEGY = "train_only_per_mel_bin_standardization"
-ENABLE_TRAIN_EVAL_METRICS = False   # extra full clean-train evaluation each epoch; expensive, so disabled by default
+ENABLE_TRAIN_EVAL_METRICS = bool(CLI_ARGS.enable_train_eval_metrics)
 DATASET_PARALLELISM_MODE = "fixed"  # safe default; set to "autotune" only for experiments, as it may be unstable on some TF/CUDA runs
 DATASET_FIXED_NUM_PARALLEL_CALLS = 2
 DATASET_FIXED_NUM_PARALLEL_READS = 2
@@ -1517,6 +1530,8 @@ class _EpochMetricsSummary(tf.keras.callbacks.Callback):
         train_loss = logs.get("loss")
         val_loss = logs.get("val_loss")
         train_acc = logs.get("train_eval_accuracy")
+        if train_acc is None:
+            train_acc = logs.get("accuracy")
         val_acc = logs.get("val_accuracy")
         train_macro_f1 = logs.get("train_eval_macro_f1")
         val_macro_f1 = logs.get("val_macro_f1")
@@ -1794,6 +1809,7 @@ _t0 = time.perf_counter()
 
 hist = history.history
 epochs_range = range(1, len(hist["accuracy"]) + 1)
+fit_accuracy_history = [float(value) for value in hist.get("accuracy", [])]
 train_eval_accuracy_history = _train_eval_accuracy_history()
 train_eval_f1_history = _train_eval_f1_history()
 
@@ -2100,6 +2116,7 @@ report = {
         "dataset_prefetch_autotune_enabled": DATASET_PREFETCH_AUTOTUNE_ENABLED,
         "dataset_prefetch_buffer_size": DATASET_PREFETCH_BUFFER_SIZE,
         "dataset_autotune_ram_budget_bytes": DATASET_AUTOTUNE_RAM_BUDGET_BYTES,
+        "fit_accuracy_per_epoch": fit_accuracy_history,
         "train_eval_accuracy_per_epoch": train_eval_accuracy_history,
         "train_eval_macro_f1_per_epoch": train_eval_f1_history,
         "lr_per_epoch": lr_logger.lrs,
