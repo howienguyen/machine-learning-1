@@ -268,8 +268,8 @@ _start_console_capture(CONSOLE_LOG_PATH)
 print(f"Run directory : {RUN_DIR}")
 print(f"Console log   : {CONSOLE_LOG_PATH}")
 
-EPOCHS = 136
-BATCH_SIZE = 64
+EPOCHS = 2
+BATCH_SIZE = 32
 JIT_COMPILE = False
 LABEL_SMOOTHING = 0.05           # Mixup already softens labels; keep CE targets sharp otherwise
 WEIGHT_DECAY = 1e-4                # L2 Regularization - v2.1: 1e-4 (was v2: 5e-4) — lighter with Mixup+dropout active
